@@ -16,7 +16,7 @@ variable "open_ports" {
 
 variable "network_type" {
   type        = string
-  description = "Tipo di rete: 'public' o 'private'"
+  description = "'public' o 'private'"
   default     = "private"
 }
 
