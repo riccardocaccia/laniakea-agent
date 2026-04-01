@@ -62,7 +62,6 @@ resource "openstack_networking_secgroup_rule_v2" "rules" {
   security_group_id = openstack_networking_secgroup_v2.dynamic_sg.id
 }
 
-# Porta di rete per la VM
 resource "openstack_networking_port_v2" "vm_port" {
   name               = "port-${var.deployment_uuid}"
   network_id         = data.openstack_networking_network_v2.private_net.id
@@ -94,12 +93,12 @@ EOF
   }
 }
 
-# Alloca floating IP dalla rete pubblica
+# --------floating IP-----
 resource "openstack_networking_floatingip_v2" "fip" {
   pool = var.public_network_name
 }
 
-# Associa floating IP alla VM
+# Associate floating IP
 resource "openstack_compute_floatingip_associate_v2" "fip_assoc" {
   floating_ip = openstack_networking_floatingip_v2.fip.address
   instance_id = openstack_compute_instance_v2.galaxy_vm.id
