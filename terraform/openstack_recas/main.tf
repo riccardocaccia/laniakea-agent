@@ -36,13 +36,13 @@ data "openstack_networking_network_v2" "public_net" {
 
 # --- RESOURCES ---
 
-# 1. Chiave SSH
+# SSH key
 resource "openstack_compute_keypair_v2" "vm_key" {
   name       = "rcaccia_key_${var.deployment_uuid}"
   public_key = var.ssh_public_key
 }
 
-# 2. Security Group: SSH (Bastion o Diretto)
+# Security Group
 resource "openstack_networking_secgroup_v2" "ssh_internal" {
   name        = "ssh-internal-${var.deployment_uuid}"
   description = "Accesso SSH limitato all'IP del Bastion"
@@ -58,7 +58,7 @@ resource "openstack_networking_secgroup_rule_v2" "ssh_from_bastion" {
   security_group_id = openstack_networking_secgroup_v2.ssh_internal.id
 }
 
-# 3. Security Group: Porte dinamiche (es. porte 80, 443, 22 per IP utente)
+# Security Group
 resource "openstack_networking_secgroup_v2" "dynamic_sg" {
   name        = "sg-dynamic-${var.deployment_uuid}"
   description = "Porte aperte dinamicamente dall'orchestratore"
@@ -75,7 +75,7 @@ resource "openstack_networking_secgroup_rule_v2" "rules" {
   security_group_id = openstack_networking_secgroup_v2.dynamic_sg.id
 }
 
-# 4. Istanza Virtual Machine
+# Virtual Machine
 resource "openstack_compute_instance_v2" "galaxy_vm" {
   name            = "galaxy-${var.deployment_uuid}"
   image_name      = var.image_name
@@ -88,8 +88,8 @@ resource "openstack_compute_instance_v2" "galaxy_vm" {
     openstack_networking_secgroup_v2.dynamic_sg.name
   ]
 
-  # SELEZIONE DINAMICA DELLA RETE:
-  # Se network_type è 'public', usa public_net. Altrimenti usa private_net.
+  # dynamic network selection
+  # if network_type == 'public', uses public_net. Otherwise private_net.
   network {
     uuid = var.network_type == "public" ? data.openstack_networking_network_v2.public_net.id : data.openstack_networking_network_v2.private_net.id
   }
@@ -98,7 +98,7 @@ resource "openstack_compute_instance_v2" "galaxy_vm" {
 # --- OUTPUT ---
 
 output "vm_ip" {
-  # Restituisce l'IP dell'istanza (sarà pubblico o privato in base alla rete scelta sopra)
+  # Instance IP 
   value       = openstack_compute_instance_v2.galaxy_vm.access_ip_v4
   description = "Indirizzo IP della VM creata"
 }
