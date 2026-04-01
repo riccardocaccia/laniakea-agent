@@ -1,0 +1,88 @@
+{
+  "deployment_uuid": "",
+  "timestamp": "",
+  "description": "",
+
+  "auth": {
+    "aai_token": "",	  
+    "sub": "",
+    "group": ""
+  },
+
+  "orchestrator": {
+    "target_provider": "",
+    "desired_orchestrator": "",
+    "endpoint": ""
+  },
+
+  "selected_provider": "",
+
+  "cloud_providers": {
+    "openstack": {
+      "os_auth_url": "",
+      "os_project_id": "",
+      "region_name": "",
+      "private_net_name": "",
+      "public_net_name": "",
+      "endpoint_overrides_network": "",
+      "endpoint_overrides_volumev3": "",
+      "endpoint_overrides_image": "",
+      "private_network_proxy_host": "",
+      "ssh_key": "",
+      "template": {
+        "url": "",
+        "path": "",
+        "branch": ""
+      },
+      "inputs": {
+        "flavor": "",
+        "image": "",
+        "os_distribution": "",
+        "os_version": "",
+        "storage_size": "",
+        "network_type": "",
+        "open_ports": [
+         {
+          "port": ,
+          "protocol": "",
+          "cidr": ""
+          },
+         {
+          "port": ,
+          "protocol": "",
+          "cidr": ""
+         }
+        ]
+      }
+    },
+
+    "aws": {
+      "region": "",
+      "bastion_ip": "",
+      "ssh_key": "",
+      "aws_access_key": "",
+      "aws_secret_key": "",
+      "template": {
+        "url": "",
+        "path": "",
+        "branch": ""
+      },
+
+      "inputs": {
+        "instance_type": "",
+        "image": "",
+        "storage_size": "",
+        "os_distribution": "",
+        "os_version": "",
+        "network_type": "",
+        "open_ports": [
+         {
+          "port": ,
+          "protocol": "",
+          "cidr": ""
+          }
+        ]
+      }
+    }
+  }
+}

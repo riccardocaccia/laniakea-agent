@@ -1,0 +1,9 @@
+---
+name: galaxy-minimal
+description: URL to Laniakea GitHub repo 
+resources:
+  ansible:
+    requirements: https://raw.githubusercontent.com/Laniakea-elixir-it/ansible-playbooks/refs/heads/main/galaxy/requirements.yml
+    playbook: https://raw.githubusercontent.com/Laniakea-elixir-it/ansible-playbooks/refs/heads/main/galaxy/galaxy.yml
+  tosca:
+    template: https://raw.githubusercontent.com/Laniakea-elixir-it/tosca-templates/refs/heads/master/galaxy/galaxy.yaml
