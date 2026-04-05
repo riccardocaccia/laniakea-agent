@@ -1,3 +1,15 @@
+"""
+Terraform orchestration agent for Laniakea.
+
+Auth logic for OpenStack:
+  - If job.auth.aai_token is present → exchange it for a Keystone token (runtime)
+  - Otherwise → use app credentials from Vault (stored at profile setup)
+
+Notifications:
+  - On success: sends email with VM IP
+  - On failure: sends email with error reason
+"""
+
 import json
 import docker
 import os
@@ -5,14 +17,14 @@ import yaml
 import logging
 import time
 from typing import Optional
-from pydantic import BaseModel, ValidationError, model_validator
+from pydantic import BaseModel
 from db_handlers import start_log_deployment, update_log_status
 from auth_utils.openstack_auth import get_keystone_token
-from vault_utils import get_secrets
+from vault_utils import get_provider_credentials
 from ansible_agent import run_ansible_step
 from destroy import run_destroy
+from notifier import send_success, send_failure
 
-# Logging configuration for debugging. Prints custom debug messages to help the debug process
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -23,192 +35,182 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class OpenPort(BaseModel):
-    """
-    Port class specifically used for a specific input that user can specify:
+# ============================================================
+# Pydantic models
+# ============================================================
 
-    - which port to open in the deployed machine.
-    """
-    port: int
+class OpenPort(BaseModel):
+    port:     int
     protocol: str
-    cidr: str
+    cidr:     str
 
 class AuthConfig(BaseModel):
-    """
-    AAI token class.
-    """
     aai_token: Optional[str] = None
-    sub: str
-    group: str = "default"
+    sub:       str
+    group:     str = "default"
 
 class OpenStackInputs(BaseModel):
-    """
-    OpenStack required inpusts for the customization of the VM.
-    """
-    flavor: str
-    image: str
+    flavor:       str
+    image:        str
     network_type: str = "private"
-    open_ports: list[OpenPort] = []
+    open_ports:   list[OpenPort] = []
 
 class AWSInputs(BaseModel):
-    """
-    AWS required inputs for the customization of the VM.
-    """
     instance_type: str
-    image: str
-    network_type: str = "private"
-    open_ports: list[OpenPort] = []
+    image:         str
+    network_type:  str = "private"
+    open_ports:    list[OpenPort] = []
 
 class TemplateConfig(BaseModel):
-    """
-    Template configuration informations.
-    """
-    url: str = ""
-    path: str = "terraform/openstack"
+    url:    str = ""
+    path:   str = "terraform/openstack"
     branch: str = "main"
 
 class OpenStackProvider(BaseModel):
-    """
-    OpenStack PROVIDER information used for the deployment.
-    """
-    os_auth_url: str
-    os_project_id: str
-    region_name: str = "RegionOne"
-    private_net_name: str = "private_net"
-    public_net_name: str = "public_net"
-    endpoint_overrides_network: str
+    os_auth_url:                 str
+    os_project_id:               str
+    region_name:                 str = "RegionOne"
+    private_net_name:            str = "private_net"
+    public_net_name:             str = "public_net"
+    endpoint_overrides_network:  str
     endpoint_overrides_volumev3: str
-    endpoint_overrides_image: str
-    private_network_proxy_host: Optional[str] = None
-    template: TemplateConfig = TemplateConfig()
-    inputs: OpenStackInputs
+    endpoint_overrides_image:    str
+    private_network_proxy_host:  Optional[str] = None
+    template:                    TemplateConfig = TemplateConfig()
+    inputs:                      OpenStackInputs
 
 class AWSProvider(BaseModel):
-    """
-    AWS PROVIDER information used for the deployment.
-    """
-    region: str
+    region:     str
     bastion_ip: Optional[str] = None
-    template: TemplateConfig = TemplateConfig(path="terraform/aws")
-    inputs: AWSInputs
+    template:   TemplateConfig = TemplateConfig(path="terraform/aws")
+    inputs:     AWSInputs
 
 class CloudProviders(BaseModel):
-    """
-    Chosen provider.
-    """
-    aws: Optional[AWSProvider] = None
+    aws:       Optional[AWSProvider] = None
     openstack: Optional[OpenStackProvider] = None
 
 class Job(BaseModel):
-    """
-    Basic job despcription containing an unique uuid and other information
-    useful for the deployment.
-    """
-    deployment_uuid: str
-    auth: AuthConfig
+    deployment_uuid:   str
+    auth:              AuthConfig
     selected_provider: str
-    cloud_providers: CloudProviders
-    vm_ip: Optional[str] = None
+    cloud_providers:   CloudProviders
+    user_sub:          Optional[str] = None
+    user_email:        Optional[str] = None   # aggiunto dall'API nel job_data
+    requested_by:      Optional[str] = None   # username leggibile per le email
+    vm_ip:             Optional[str] = None
+
+    def get_sub(self) -> str:
+        return self.user_sub or self.auth.sub
+
+    def get_username(self) -> str:
+        return self.requested_by or self.auth.sub[:8]
+
+# ============================================================
+# Orchestration
+# ============================================================
 
 def run_orchestration(job: Job):
-    """
-    Core orchestration engine responsible for the end-to-end lifecycle of a cloud deployment.
-
-    The function follows a strict sequential pipeline:
-    1. Infrastructure Initialization: Resolves the local Terraform template paths and 
-       synchronizes the deployment status with the tracking database.
-    2. Secure Credential Sourcing: Interfaces with HashiCorp Vault to retrieve sensitive 
-       SSH keys and provider-specific API credentials (Keystone tokens or AWS keys).
-    3. Containerized Provisioning: Deploys a transient Docker container running Terraform 
-       to create the virtual infrastructure, ensuring environment parity and portability.
-    4. State Retrieval: Extracts the newly created VM's IP address from Terraform's 
-       state output to facilitate the next configuration phase.
-    5. Configuration Management: Hands over the control to the Ansible Agent for 
-       automated software stack installation.
-    6. Automated Rollback (Fail-Safe): Implements a 'Destroy-on-Failure' policy. If any 
-       step in the Ansible configuration fails, it triggers an emergency cleanup to 
-       delete the VM, preventing billing leakages and 'ghost' resources.
-    """
-    uuid = job.deployment_uuid
+    uuid     = job.deployment_uuid
     provider = job.selected_provider.lower()
-    group = job.auth.group
-    
+    user_sub = job.get_sub()
+    email    = job.user_email
+    username = job.get_username()
+
     if provider == 'openstack':
-        template_path = job.cloud_providers.openstack.template.path
+        tf_dir = os.path.abspath(job.cloud_providers.openstack.template.path)
     elif provider == 'aws':
-        template_path = job.cloud_providers.aws.template.path
+        tf_dir = os.path.abspath(job.cloud_providers.aws.template.path)
+    else:
+        logger.error(f"[{uuid}] Unknown provider: {provider}")
+        return
 
-    tf_dir = os.path.abspath(template_path)
-
-    logger.info(f"[{uuid}] Provisioning started on {provider}...")
+    logger.info(f"[{uuid}] Provisioning started on {provider} for user {user_sub[:8]}...")
     start_log_deployment(uuid)
     update_log_status(uuid, "INFRASTRUCTURE_PROVISIONING_TERRAFORM")
 
     try:
         client = docker.from_env()
-        
-        # Vault secret retrieving
-        secrets = get_secrets(f"SECRET/infrastructure/{provider}/{group}")
-        if not secrets:
-            raise Exception(f"ERROR: did not find any secrets for the group: {group}")
-        
-        public_key = secrets.get('ssh_key_public')
-        if not public_key:
-            raise Exception("ERROR: ssh_key_public not found in the Vault!")
+
+        # ── Leggi credenziali da Vault ────────────────────────────────────────
+        logger.info(f"[{uuid}] Reading credentials from Vault...")
+        secrets = get_provider_credentials(user_sub, provider)
+
+        ssh_key = secrets.get("ssh_key")
+        if not ssh_key:
+            raise Exception("ssh_key not found in Vault credentials!")
 
         tf_vars = {
             "TF_VAR_deployment_uuid": str(uuid),
-            "TF_VAR_ssh_public_key": str(public_key).strip()
+            "TF_VAR_ssh_public_key":  str(ssh_key).strip(),
         }
 
-        # specific variables for different providers
+        # specific variables divided by providers
         if provider == 'openstack':
-            os_data = job.cloud_providers.openstack
-            os_token = ""
-            app_cred_id = ""
+            os_data         = job.cloud_providers.openstack
+            os_token        = ""
+            app_cred_id     = ""
             app_cred_secret = ""
 
             if job.auth.aai_token and job.auth.aai_token.strip():
-                os_token = get_keystone_token(job.auth.aai_token, os_data.os_auth_url, os_data.os_project_id)
+                logger.info(f"[{uuid}] AAI token found — exchanging for Keystone token...")
+                os_token = get_keystone_token(
+                    job.auth.aai_token,
+                    os_data.os_auth_url,
+                    os_data.os_project_id,
+                )
+                if not os_token:
+                    raise Exception("AAI -> Keystone token exchange failed.")
             else:
-                app_cred_id = secrets.get('application_credential_id', "")
-                app_cred_secret = secrets.get('application_credential_secret', "")
-            
+                logger.info(f"[{uuid}] No AAI token — using app credentials from Vault...")
+                app_cred_id     = secrets.get("app_credential_id", "")
+                app_cred_secret = secrets.get("app_credential_secret", "")
+                if not app_cred_id or not app_cred_secret:
+                    raise Exception(
+                        "No AAI token in job and no app credentials found in Vault. "
+                        "Cannot authenticate to OpenStack."
+                    )
+
+            proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
+
             tf_vars.update({
-                "TF_VAR_os_auth_url": os_data.os_auth_url,
-                "TF_VAR_os_tenant_id": os_data.os_project_id,
-                "TF_VAR_os_token": os_token,
-                "TF_VAR_os_app_cred_id": app_cred_id,
-                "TF_VAR_os_app_cred_secret": app_cred_secret,
-                "TF_VAR_os_region": os_data.region_name,
+                "TF_VAR_os_auth_url":          os_data.os_auth_url,
+                "TF_VAR_os_tenant_id":         os_data.os_project_id,
+                "TF_VAR_os_token":             os_token,
+                "TF_VAR_os_app_cred_id":       app_cred_id,
+                "TF_VAR_os_app_cred_secret":   app_cred_secret,
+                "TF_VAR_os_region":            os_data.region_name,
                 "TF_VAR_private_network_name": os_data.private_net_name,
-                "TF_VAR_public_network_name": os_data.public_net_name,
-                "TF_VAR_endpoint_network": os_data.endpoint_overrides_network,
-                "TF_VAR_endpoint_volumev3": os_data.endpoint_overrides_volumev3,
-                "TF_VAR_endpoint_image": os_data.endpoint_overrides_image,
-                "TF_VAR_flavor_name": os_data.inputs.flavor,
-                "TF_VAR_image_name": os_data.inputs.image,
-                "TF_VAR_network_type": os_data.inputs.network_type,
-                "TF_VAR_bastion_ip": os_data.private_network_proxy_host or "0.0.0.0",
-                "TF_VAR_open_ports": json.dumps([p.model_dump() for p in os_data.inputs.open_ports])
+                "TF_VAR_public_network_name":  os_data.public_net_name,
+                "TF_VAR_endpoint_network":     os_data.endpoint_overrides_network,
+                "TF_VAR_endpoint_volumev3":    os_data.endpoint_overrides_volumev3,
+                "TF_VAR_endpoint_image":       os_data.endpoint_overrides_image,
+                "TF_VAR_flavor_name":          os_data.inputs.flavor,
+                "TF_VAR_image_name":           os_data.inputs.image,
+                "TF_VAR_network_type":         os_data.inputs.network_type,
+                "TF_VAR_bastion_ip":           proxy_host,
+                "TF_VAR_open_ports":           json.dumps([p.model_dump() for p in os_data.inputs.open_ports]),
             })
 
         elif provider == 'aws':
-            aws_data = job.cloud_providers.aws
+            aws_data   = job.cloud_providers.aws
+            access_key = secrets.get("access_key")
+            secret_key = secrets.get("secret_key")
+            if not access_key or not secret_key:
+                raise Exception("AWS access_key or secret_key not found in Vault credentials!")
+
             tf_vars.update({
-                "TF_VAR_aws_access_key": secrets['aws_access_key'],
-                "TF_VAR_aws_secret_key": secrets['aws_secret_key'],
-                "TF_VAR_aws_region": aws_data.region,
-                "TF_VAR_instance_type": aws_data.inputs.instance_type,
-                "TF_VAR_image_name": str(aws_data.inputs.image).strip(),
-                "TF_VAR_network_type": aws_data.inputs.network_type,
-                "TF_VAR_bastion_ip": aws_data.bastion_ip or "0.0.0.0",
-                "TF_VAR_open_ports": json.dumps([p.model_dump() for p in aws_data.inputs.open_ports])
+                "TF_VAR_aws_access_key": access_key,
+                "TF_VAR_aws_secret_key": secret_key,
+                "TF_VAR_aws_region":     aws_data.region,
+                "TF_VAR_instance_type":  aws_data.inputs.instance_type,
+                "TF_VAR_image_name":     str(aws_data.inputs.image).strip(),
+                "TF_VAR_network_type":   aws_data.inputs.network_type,
+                "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "0.0.0.0",
+                "TF_VAR_open_ports":     json.dumps([p.model_dump() for p in aws_data.inputs.open_ports]),
             })
 
-        
-        logger.info(f"[{uuid}] Running a container with Terraform for {provider}...")
-        # Docker container informations
+        #Terraform apply
+        logger.info(f"[{uuid}] Running Terraform container for {provider}...")
         client.containers.run(
             image="hashicorp/terraform:1.5",
             entrypoint="/bin/sh",
@@ -216,62 +218,57 @@ def run_orchestration(job: Job):
             volumes={tf_dir: {'bind': '/src', 'mode': 'rw'}},
             working_dir="/src",
             environment=tf_vars,
-            remove=True
+            remove=True,
         )
 
-        # recupero IP della vm creata
-        logger.info(f"[{uuid}] output vm_ip retrieving...")
-
+        # Ip retrieving
+        logger.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
         vm_ip_bytes = client.containers.run(
             image="hashicorp/terraform:1.5",
             command="output -raw vm_ip",
-            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},   # read only because we are looking for the ip
+            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},
             working_dir="/src",
-            remove=True
+            remove=True,
         )
-        # converting the ip to human-readable
-        vm_ip = vm_ip_bytes.decode('utf-8').strip()
+        vm_ip     = vm_ip_bytes.decode('utf-8').strip()
         job.vm_ip = vm_ip
-        
-        # Wait the deployment to be completed
-        logger.info(f"[{uuid}] Wait 30 seconds for the SSH on Rocky...")
+
+        logger.info(f"[{uuid}] Waiting 30s for SSH on Rocky...")
         time.sleep(30)
 
-        update_log_status(uuid, "INFRASTRACTURE_READY", ip_address=vm_ip)
-        logger.info(f"[{uuid}] Infrastructure successfully deployed. IP: {vm_ip}")
+        update_log_status(uuid, "INFRASTRUCTURE_READY", ip_address=vm_ip)
+        logger.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
 
-        ########### PARSING TEMPLATE YAML
+        # ansible steps
         with open("repo_url_template.yml", "r") as yf:
             tpl = yaml.safe_load(yf)
-            
-        pb_url = tpl['resources']['ansible']['playbook']
+
+        pb_url  = tpl['resources']['ansible']['playbook']
         req_url = tpl['resources']['ansible']['requirements']
 
-        # ANSIBLE STEP + FAIL-SAFE
         ansible_ok = run_ansible_step(job, pb_url, req_url)
 
         if not ansible_ok:
-            logger.error(f"[{uuid}] Ansible has failed! Running emergency DESTROY...")
-            run_destroy(job) # clean the broken VM on OpenStack/AWS
-            update_log_status(uuid, "FAILED", logs="Ansible has failed! Resources destroyed.")
+            logger.error(f"[{uuid}] Ansible failed — running emergency destroy...")
+            run_destroy(job)
+            update_log_status(uuid, "FAILED", logs="Ansible failed. Resources destroyed.")
+            send_failure(email, username, uuid, reason="Configuration step (Ansible) failed. Resources have been cleaned up.")
         else:
             update_log_status(uuid, "READY")
-            logger.info(f"[{uuid}] Deployment successfully completed.")
+            logger.info(f"[{uuid}] Deployment completed successfully.")
+            send_success(email, username, uuid, vm_ip=vm_ip)
 
     except Exception as e:
-        logger.error(f"[{uuid}] Critical Terraform ERROR: {e}")
+        logger.error(f"[{uuid}] Critical error: {e}")
         run_destroy(job)
         update_log_status(uuid, "FAILED", logs=str(e))
+        send_failure(email, username, uuid, reason=str(e))
 
 
-# main block
+#test
 
 if __name__ == "__main__":
-    try:
-        with open("deployment_info.json", "r") as f:
-            raw_data = json.load(f)
-        
-        job_request = Job(**raw_data)
-        run_orchestration(job_request)
-    except Exception as e:
-        logger.error(f"Errore caricamento Job: {e}")
+    with open("deployment_info.json", "r") as f:
+        raw_data = json.load(f)
+    job = Job(**raw_data)
+    run_orchestration(job)

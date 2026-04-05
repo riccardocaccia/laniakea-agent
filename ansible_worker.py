@@ -6,10 +6,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# CHANGE HERE -> put into repo_template
-GROUP_VARS_URL = "https://raw.githubusercontent.com/Laniakea-elixir-it/ansible-playbooks/refs/heads/main/galaxy/group_vars/galaxy.yml"
-NGINX_TEMPLATE_URL = "https://raw.githubusercontent.com/Laniakea-elixir-it/ansible-playbooks/refs/heads/main/galaxy/templates/nginx/galaxy.j2"
-
+# NOTE: move from here, not interesting... also update from rcaccia to laniakea
+GROUP_VARS_URL = "https://raw.githubusercontent.com/riccardocaccia/laniakea-nebula/clean-main/terraform/ansible/group_vars/galaxy.yml"
+NGINX_TEMPLATE_URL = "https://raw.githubusercontent.com/riccardocaccia/laniakea-nebula/clean-main/terraform/ansible/templates/nginx/galaxy.j2"
 ANSIBLE_VENV = "/tmp/ansible-venv"
 
 class AnsibleWorker:
@@ -43,6 +42,10 @@ class AnsibleWorker:
             return False, str(e)
 
     def execute_deployment(self, target_ip, ssh_key_path, bastion_ip=None):
+        """
+        Run CLI command to copy & download playbooks.
+        Make a proxy jump if a bastion is specified.
+        """
         ssh_base = (
             f"ssh -i {ssh_key_path} "
             f"-o StrictHostKeyChecking=no "
@@ -65,22 +68,22 @@ class AnsibleWorker:
         remote = f"rocky@{target_ip}"
 
         steps = [
-            # 1. Crea struttura directory sulla VM
+            # 1. Create directory strucfure VM
             f"{ssh_base} {remote} 'sudo mkdir -p /tmp/galaxy-deploy/group_vars /tmp/galaxy-deploy/templates/nginx && sudo chown -R rocky /tmp/galaxy-deploy'",
 
-            # 2. Copia tutti i file
+            # 2. Copy all files
             f"{scp_base} {self.playbook_path} {remote}:/tmp/galaxy-deploy/deploy.yml",
             f"{scp_base} {self.requirements_path} {remote}:/tmp/galaxy-deploy/requirements.yml",
             f"{scp_base} {self.group_vars_path} {remote}:/tmp/galaxy-deploy/group_vars/all.yml",
             f"{scp_base} {self.nginx_template_path} {remote}:/tmp/galaxy-deploy/templates/nginx/galaxy.j2",
 
-            # 3. Crea virtualenv e installa ansible
+            # 3. Create a virtualenv and install ansible
             f"{ssh_base} {remote} 'sudo dnf install -y python3-pip git && sudo python3 -m venv {ANSIBLE_VENV} && sudo {ANSIBLE_VENV}/bin/pip install ansible \"virtualenv<20.22\"'",
 
-            # 4. Installa ruoli ansible
+            # 4. Install ansible roles
             f"{ssh_base} {remote} 'sudo {ANSIBLE_VENV}/bin/ansible-galaxy install -r /tmp/galaxy-deploy/requirements.yml -p /tmp/galaxy-deploy/roles'",
 
-            # 5. Esegui playbook in locale sulla VM come root dalla directory corretta
+            # 5. execute playbooks in local as root 
             (
                 f"{ssh_base} {remote} "
                 f"'cd /tmp/galaxy-deploy && "
@@ -94,6 +97,7 @@ class AnsibleWorker:
             ),
         ]
 
+        # debug helper
         for i, step in enumerate(steps):
             logger.info(f"[{self.uuid}] Step {i+1}/{len(steps)}: {step[:80]}...")
             res = subprocess.run(step, shell=True)
@@ -104,6 +108,9 @@ class AnsibleWorker:
         return True
 
     def cleanup(self):
+        """
+        Clean all the directories after the process
+        """
         if os.path.exists(self.base_dir):
             shutil.rmtree(self.base_dir)
             logger.info(f"[{self.uuid}] Pulizia cartella temporanea completata.")

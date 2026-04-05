@@ -8,16 +8,18 @@ logger = logging.getLogger(__name__)
 
 def run_ansible_step(job, playbook_url, requirements_url):
     """
-    Passes the needed info to the ansible worker funcions in order to 
+    Passes the needed info to the ansible worker funcions in order to
     configure the machine with the correct software.
     """
     uuid = job.deployment_uuid
+    # NOTE: PRIVATE KEY MANAGEMENT to be imporved
     key_path = f"keys/{uuid}.pem"
-    
+
     worker = AnsibleWorker(playbook_url, requirements_url, uuid)
-    
+
     try:
         success_prep, msg = worker.prepare_environment()
+
         if not success_prep:
             logger.error(f"[{uuid}] ERROR in Ansible preparation: {msg}")
             return False
@@ -34,7 +36,6 @@ def run_ansible_step(job, playbook_url, requirements_url):
             ssh_key_path=key_path,
             bastion_ip=bastion
         )
-        
         worker.cleanup() # clean /tmp/uuid
         return success
 

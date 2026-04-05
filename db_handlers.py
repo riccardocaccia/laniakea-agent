@@ -6,7 +6,7 @@ def get_db_connection():
     """
     Connection function to write and retrieve informations from the Data base
     """
-    # CHANGE HERE
+    # NOTE: CHANGE HERE
     return psycopg2.connect(
         host="localhost",
         database="orchestrator_db",
