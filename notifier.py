@@ -1,5 +1,5 @@
 """
-Laniakea Notifier — sends email notifications to users via Gmail SMTP.
+Laniakea Notifier sends email notifications to users via gmail SMTP
 """
 
 import logging
@@ -30,7 +30,7 @@ def _send_email(to: str, subject: str, body_html: str, body_text: str):
     msg.attach(MIMEText(body_html, "html"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
+        server.ehlo()                                     # extended HELLO
         server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
         server.sendmail(SMTP_USER, to, msg.as_string())
@@ -38,10 +38,11 @@ def _send_email(to: str, subject: str, body_html: str, body_text: str):
 
 def send_success(to: str, username: str, deployment_uuid: str, vm_ip: str | None = None):
     """
-    Deployment completed notify.
+    Deployment completed case
     """
     if not to:
-        logger.warning(f"[{deployment_uuid}] No email address — skipping success notification.")
+        # TODO: improve this case -> an email must be present? 
+        logger.warning(f"[{deployment_uuid}] If no email address provided the success notification is skipped.")
         return
 
     ip_line_html = f"<p><b>IP della VM:</b> {vm_ip}</p>" if vm_ip else ""
@@ -73,16 +74,18 @@ def send_success(to: str, username: str, deployment_uuid: str, vm_ip: str | None
     try:
         _send_email(to, subject, body_html, body_text)
         logger.info(f"[{deployment_uuid}] Success notification sent to {to}")
+
+    # error in email sending
     except Exception as exc:
         logger.error(f"[{deployment_uuid}] Failed to send success email to {to}: {exc}")
 
 
 def send_failure(to: str, username: str, deployment_uuid: str, reason: str | None = None):
     """
-    Deployment failed.
+    Deployment failed case
     """
     if not to:
-        logger.warning(f"[{deployment_uuid}] No email address — skipping failure notification.")
+        logger.warning(f"[{deployment_uuid}] If no email address provided the success notification is skipped.")
         return
 
     reason_line_html = f"<p><b>Motivo:</b> {reason}</p>" if reason else ""
@@ -116,5 +119,7 @@ def send_failure(to: str, username: str, deployment_uuid: str, reason: str | Non
     try:
         _send_email(to, subject, body_html, body_text)
         logger.info(f"[{deployment_uuid}] Failure notification sent to {to}")
+
+    # error
     except Exception as exc:
         logger.error(f"[{deployment_uuid}] Failed to send failure email to {to}: {exc}")
