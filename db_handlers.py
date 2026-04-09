@@ -4,9 +4,9 @@ import datetime
 
 def get_db_connection():
     """
-    Connection function to write and retrieve informations from the Data base
+    Connection function to write and retrieve informations from the Data base.
     """
-    # NOTE: CHANGE HERE
+    # NOTE UPDATE HERE: to .env os.environ()
     return psycopg2.connect(
         host="localhost",
         database="orchestrator_db",
