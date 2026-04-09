@@ -1,6 +1,9 @@
 # NOTE: to be completed and modified once THE FINAL VERSION OF VAULT IS UP
 
 def get_vault_client():
+    """
+    Get connection with vault accessing through root token (PUT IN THE .env)
+    """
     client = hvac.Client(
         url='',
         token=''
@@ -8,6 +11,7 @@ def get_vault_client():
     return client
 
 def get_secrets(path):
+    # TODO improve or eliminate kv 1, I don't like this management
     client = get_vault_client()
     try:
         # Try read with KV Version 2
@@ -24,6 +28,7 @@ def get_secrets(path):
                 path=path
             )
             return read_response['data']
+            
         except Exception as e:
             print(f"Error: {e}")
             return None
