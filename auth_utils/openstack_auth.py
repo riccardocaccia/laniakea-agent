@@ -15,18 +15,17 @@ def get_keystone_token(aai_token, auth_url, project_id):
         
         auth = loader.load_from_options(
             auth_url=auth_url,
-            ### NOTE ###
+            ### TODO: env variable? or input? ###
             identity_provider='recas-bari', 
-            ############
+            #####################################
             protocol='openid',
             access_token=aai_token,
             project_id=project_id
         )
         
         sess = session.Session(auth=auth, verify=True) 
-        
         token_os = sess.get_token()
-        logger.info("Token AAI exchange -> OpenStack: Success!")
+        logger.info("Token AAI exchange: success!")
         return token_os
 
     except Exception as e:
