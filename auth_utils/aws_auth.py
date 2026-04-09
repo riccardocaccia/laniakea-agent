@@ -8,6 +8,7 @@ def get_aws_credentials(group: str):
     AWS keys retrieving from Vault.
     """
     try:
+        # TODO: modify once the final vault is up
         vault_path = f"SECRET/infrastructure/aws/{group}"
         secrets = get_secrets(vault_path)
         
