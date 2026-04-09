@@ -1,4 +1,4 @@
-# Script to let agent listening on a specified redis queue: ONLY TEST
+# Script to let agent listening on a specified redis queue: ONLY for TEST
 
 from redis import Redis
 from rq import Worker, Queue
