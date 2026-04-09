@@ -2,7 +2,7 @@
 Terraform orchestration agent for Laniakea.
 
 Auth logic for OpenStack:
-  - If job.auth.aai_token is present → exchange it for a Keystone token (runtime)
+  - If job.auth.aai_token is present → exchange it for a Keystone token
   - Otherwise → use app credentials from Vault (stored at profile setup)
 
 Notifications:
@@ -25,6 +25,7 @@ from ansible_agent import run_ansible_step
 from destroy import run_destroy
 from notifier import send_success, send_failure
 
+# Logging configuration for debugging. Prints custom debug messages to help the debug process
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -40,33 +41,53 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 class OpenPort(BaseModel):
+    """
+    Port class specifically used for a specific input that user can specify:
+
+    - which port to open in the deployed machine.
+    """
     port:     int
     protocol: str
     cidr:     str
 
 class AuthConfig(BaseModel):
+    """
+    AAI token class.
+    """
     aai_token: Optional[str] = None
     sub:       str
     group:     str = "default"
 
 class OpenStackInputs(BaseModel):
+    """
+    OpenStack required inpusts for the customization of the VM.
+    """
     flavor:       str
     image:        str
     network_type: str = "private"
     open_ports:   list[OpenPort] = []
 
 class AWSInputs(BaseModel):
+    """
+    AWS required inpusts for the customization of the VM.
+    """
     instance_type: str
     image:         str
     network_type:  str = "private"
     open_ports:    list[OpenPort] = []
 
 class TemplateConfig(BaseModel):
+    """
+    Template configuration informations.
+    """
     url:    str = ""
     path:   str = "terraform/openstack"
     branch: str = "main"
 
 class OpenStackProvider(BaseModel):
+    """
+    OpenStack PROVIDER information used for the deployment.
+    """
     os_auth_url:                 str
     os_project_id:               str
     region_name:                 str = "RegionOne"
@@ -80,23 +101,33 @@ class OpenStackProvider(BaseModel):
     inputs:                      OpenStackInputs
 
 class AWSProvider(BaseModel):
+    """
+    AWS PROVIDER information used for the deployment.
+    """
     region:     str
     bastion_ip: Optional[str] = None
     template:   TemplateConfig = TemplateConfig(path="terraform/aws")
     inputs:     AWSInputs
 
 class CloudProviders(BaseModel):
+    """
+    Chosen provider.
+    """
     aws:       Optional[AWSProvider] = None
     openstack: Optional[OpenStackProvider] = None
 
 class Job(BaseModel):
+    """
+    Basic job despcription containing an unique uuid and other useful 
+    information for the deployment.
+    """
     deployment_uuid:   str
     auth:              AuthConfig
     selected_provider: str
     cloud_providers:   CloudProviders
     user_sub:          Optional[str] = None
-    user_email:        Optional[str] = None   # aggiunto dall'API nel job_data
-    requested_by:      Optional[str] = None   # username leggibile per le email
+    user_email:        Optional[str] = None   # added from api in job_data
+    requested_by:      Optional[str] = None   # username  
     vm_ip:             Optional[str] = None
 
     def get_sub(self) -> str:
@@ -110,6 +141,25 @@ class Job(BaseModel):
 # ============================================================
 
 def run_orchestration(job: Job):
+    """
+    Core orchestration engine responsible for the end-to-end lifecycle of a cloud deployment.
+
+    The function follows a sequential pipeline:
+    1. Infrastructure Initialization: Resolves the local Terraform template paths and
+       synchronizes the deployment status with the tracking database.
+    2. Secure Credential Sourcing: Interfaces with HashiCorp Vault to retrieve sensitive
+       SSH keys and provider-specific API credentials (Keystone tokens or AWS keys).
+    3. Containerized Provisioning: Deploys a transient Docker container running Terraform
+       to create the virtual infrastructure, ensuring environment parity and portability.
+    4. State Retrieval: Extracts the newly created VM's IP address from Terraform's
+       state output to facilitate the next configuration phase.
+    5. Configuration Management: Hands over the control to the Ansible Agent for
+       automated software stack installation.
+    6. Automated Rollback (Fail-Safe): Implements a 'Destroy-on-Failure' policy. If any
+       step in the Ansible configuration fails, it triggers an emergency cleanup to
+       delete the VM, preventing billing leakages and 'ghost' resources.
+    7. Mail 'callback': send to the user email a notification with the deployment outcome.
+    """
     uuid     = job.deployment_uuid
     provider = job.selected_provider.lower()
     user_sub = job.get_sub()
@@ -131,10 +181,9 @@ def run_orchestration(job: Job):
     try:
         client = docker.from_env()
 
-        # ── Leggi credenziali da Vault ────────────────────────────────────────
+        # Vault reading
         logger.info(f"[{uuid}] Reading credentials from Vault...")
         secrets = get_provider_credentials(user_sub, provider)
-
         ssh_key = secrets.get("ssh_key")
         if not ssh_key:
             raise Exception("ssh_key not found in Vault credentials!")
@@ -152,16 +201,16 @@ def run_orchestration(job: Job):
             app_cred_secret = ""
 
             if job.auth.aai_token and job.auth.aai_token.strip():
-                logger.info(f"[{uuid}] AAI token found — exchanging for Keystone token...")
+                logger.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
                 os_token = get_keystone_token(
                     job.auth.aai_token,
                     os_data.os_auth_url,
                     os_data.os_project_id,
                 )
                 if not os_token:
-                    raise Exception("AAI -> Keystone token exchange failed.")
+                    raise Exception("Keystone token exchange failed.")
             else:
-                logger.info(f"[{uuid}] No AAI token — using app credentials from Vault...")
+                logger.info(f"[{uuid}] No AAI token: using app credentials from Vault...")
                 app_cred_id     = secrets.get("app_credential_id", "")
                 app_cred_secret = secrets.get("app_credential_secret", "")
                 if not app_cred_id or not app_cred_secret:
@@ -211,6 +260,7 @@ def run_orchestration(job: Job):
 
         #Terraform apply
         logger.info(f"[{uuid}] Running Terraform container for {provider}...")
+        # Docker info
         client.containers.run(
             image="hashicorp/terraform:1.5",
             entrypoint="/bin/sh",
@@ -221,36 +271,37 @@ def run_orchestration(job: Job):
             remove=True,
         )
 
-        # Ip retrieving
+        # IP retrieving
         logger.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
         vm_ip_bytes = client.containers.run(
             image="hashicorp/terraform:1.5",
             command="output -raw vm_ip",
-            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},
+            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},                 # read only! we are looking for ip, no other action
             working_dir="/src",
             remove=True,
         )
+        # converting the ip to human-readable
         vm_ip     = vm_ip_bytes.decode('utf-8').strip()
         job.vm_ip = vm_ip
-
+      
         logger.info(f"[{uuid}] Waiting 30s for SSH on Rocky...")
         time.sleep(30)
-
         update_log_status(uuid, "INFRASTRUCTURE_READY", ip_address=vm_ip)
         logger.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
 
-        # ansible steps
+        # ansible steps -> repo url provided by repo_url_template.yml file
         with open("repo_url_template.yml", "r") as yf:
             tpl = yaml.safe_load(yf)
 
         pb_url  = tpl['resources']['ansible']['playbook']
         req_url = tpl['resources']['ansible']['requirements']
 
+        # safe fail in ansible_agent
         ansible_ok = run_ansible_step(job, pb_url, req_url)
 
         if not ansible_ok:
-            logger.error(f"[{uuid}] Ansible failed — running emergency destroy...")
-            run_destroy(job)
+            logger.error(f"[{uuid}] Ansible failed: running emergency destroy...")
+            run_destroy(job)  # clean the broken VM 
             update_log_status(uuid, "FAILED", logs="Ansible failed. Resources destroyed.")
             send_failure(email, username, uuid, reason="Configuration step (Ansible) failed. Resources have been cleaned up.")
         else:
@@ -260,13 +311,12 @@ def run_orchestration(job: Job):
 
     except Exception as e:
         logger.error(f"[{uuid}] Critical error: {e}")
-        run_destroy(job)
+        run_destroy(job)     # clean the broken VM 
         update_log_status(uuid, "FAILED", logs=str(e))
         send_failure(email, username, uuid, reason=str(e))
 
 
-#test
-
+# main block
 if __name__ == "__main__":
     with open("deployment_info.json", "r") as f:
         raw_data = json.load(f)
