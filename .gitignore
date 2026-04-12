@@ -1,2 +1,10 @@
 .env
+*.key
+*.cnf
+*.csr
+*.crt
+__pycache__/
+*.pem
 *.log
+.terraform*
+terraform.tfstate*

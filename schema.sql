@@ -1,63 +1,67 @@
-# NO need for this file
-# used to mimic dashboard DB
-# if you want to use this config assure you to have a docker running with Posgre-SQL
+-- Laniakea Database Schema
+-- This file mimics the Dashboard Database structure.
+-- Requirements: PostgreSQL instance (Docker recommended).
 
--- Estensione per gestire i UUID se necessario (opzionale)
+-- Extension for UUID generation (Optional but recommended for unique identifiers)
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Tabella Versioni (Alembic)
+-- Migration Tracking Table (Alembic)
+-- Used by SQLAlchemy/Alembic to track the current database version.
 CREATE TABLE alembic_version (
     version_num VARCHAR(32) NOT NULL,
     PRIMARY KEY (version_num)
 );
 
--- Tabella Utenti
+-- Users Table
+-- Stores user profiles synchronized from the Identity Provider (OIDC).
 CREATE TABLE users (
-    sub VARCHAR(36) NOT NULL,
-    name VARCHAR(128),
-    username VARCHAR(64) NOT NULL,
+    sub VARCHAR(36) NOT NULL,              -- Unique Subject ID from the OIDC provider
+    name VARCHAR(128),                     -- Full name
+    username VARCHAR(64) NOT NULL,         -- Login username
     given_name VARCHAR(64),
     family_name VARCHAR(64),
     email VARCHAR(64) NOT NULL,
     organisation_name VARCHAR(64),
-    picture VARCHAR(128),
-    role VARCHAR(32) NOT NULL,
-    active BOOLEAN NOT NULL DEFAULT TRUE,
-    sshkey TEXT,
+    picture VARCHAR(128),                  -- Profile picture URL
+    role VARCHAR(32) NOT NULL,             -- User role (e.g., admin, user)
+    active BOOLEAN NOT NULL DEFAULT TRUE,  -- Account status
+    sshkey TEXT,                           -- User's public SSH key
     PRIMARY KEY (sub)
 );
 
--- Tabella Gruppi
+-- Groups Table
+-- Defines research groups or project-based clusters.
 CREATE TABLE users_group (
     name VARCHAR(32) NOT NULL,
     PRIMARY KEY (name)
 );
 
--- Tabella Deployments
+-- Deployments Table
+-- Main table for tracking cloud infrastructure requests and lifecycle.
 CREATE TABLE deployments (
-    uuid VARCHAR(36) NOT NULL,
-    creation_time TIMESTAMP,
-    update_time TIMESTAMP,
-    physicalId VARCHAR(36),
-    description VARCHAR(256),
-    status VARCHAR(128),
-    status_reason TEXT,
-    outputs TEXT,
-    task VARCHAR(64),
-    links TEXT,
-    provider_name VARCHAR(128),
-    endpoint VARCHAR(256),
-    template TEXT,
-    inputs TEXT,
-    params TEXT,
-    locked BOOLEAN NOT NULL DEFAULT FALSE,
+    uuid VARCHAR(36) NOT NULL,             -- Unique Deployment identifier
+    creation_time TIMESTAMP,               -- Time of initial request
+    update_time TIMESTAMP,                 -- Last status change time
+    physicalId VARCHAR(36),                -- Real ID on the Cloud Provider (OpenStack/AWS UUID)
+    description VARCHAR(256),              -- User-friendly name/notes
+    status VARCHAR(128),                   -- State (e.g., QUEUED, CREATE_COMPLETE, CREATE_FAILED)
+    status_reason TEXT,                    -- Logs or error messages (e.g., Terraform output)
+    outputs TEXT,                          -- JSON-formatted output parameters (e.g., IP addresses)
+    task VARCHAR(64),                      -- Current orchestration task
+    links TEXT,                            -- Associated resource links
+    provider_name VARCHAR(128),            -- Target provider (OpenStack, AWS)
+    endpoint VARCHAR(256),                 -- Provider API endpoint
+    template TEXT,                         -- The underlying Terraform/TOSCA code
+    inputs TEXT,                           -- Raw input variables
+    params TEXT,                           -- Internal execution parameters
+    locked BOOLEAN NOT NULL DEFAULT FALSE, -- Prevents concurrent modifications
     feedback_required BOOLEAN NOT NULL DEFAULT FALSE,
     remote BOOLEAN NOT NULL DEFAULT FALSE,
-    issuer VARCHAR(256),
+    issuer VARCHAR(256),                   -- Token issuer (OIDC)
     storage_encryption BOOLEAN NOT NULL DEFAULT FALSE,
-    vault_secret_uuid VARCHAR(36),
+    vault_secret_uuid VARCHAR(36),         -- Link to HashiCorp Vault credentials
     vault_secret_key TEXT,
-    sub VARCHAR(36),
+    sub VARCHAR(36),                       -- Owner ID (Foreign Key to users table)
     elastic BOOLEAN NOT NULL DEFAULT FALSE,
     updatable BOOLEAN NOT NULL DEFAULT FALSE,
     keep_last_attempt BOOLEAN NOT NULL DEFAULT FALSE,
@@ -69,30 +73,35 @@ CREATE TABLE deployments (
     additional_outputs TEXT,
     stoutputs TEXT,
     template_type VARCHAR(16),
-    user_group VARCHAR(256),
+    user_group VARCHAR(256),               -- Group context for this deployment
     PRIMARY KEY (uuid),
+    -- Foreign Key Constraint: Ensures every deployment belongs to an existing user
     CONSTRAINT deployments_ibfk_1 FOREIGN KEY (sub) REFERENCES users (sub)
 );
 
--- Tabella Servizi
+-- Service Visibility Type (Enumerated type)
 CREATE TYPE visibility_type AS ENUM ('private', 'public');
 
+-- Service Catalog Table
+-- Stores applications or tools available for deployment.
 CREATE TABLE service (
-    id SERIAL PRIMARY KEY,
-    url VARCHAR(128) NOT NULL UNIQUE,
+    id SERIAL PRIMARY KEY,                 -- Auto-incrementing primary key
+    url VARCHAR(128) NOT NULL UNIQUE,      -- Service access URL
     name VARCHAR(128) NOT NULL,
-    icon VARCHAR(128) NOT NULL DEFAULT '',
+    icon VARCHAR(128) NOT NULL DEFAULT '', -- Icon identifier or path
     description TEXT,
     visibility visibility_type NOT NULL DEFAULT 'private',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabella Accesso Servizi
+-- Service Access Table (RBAC)
+-- Manages permissions: which groups can see/use which services.
 CREATE TABLE service_access (
     id SERIAL PRIMARY KEY,
     service_id INTEGER,
     group_id VARCHAR(32),
+    -- On Delete Cascade: If a group or service is removed, access rules are deleted automatically
     CONSTRAINT service_access_ibfk_1 FOREIGN KEY (group_id) REFERENCES users_group (name) ON DELETE CASCADE,
     CONSTRAINT service_access_ibfk_2 FOREIGN KEY (service_id) REFERENCES service (id) ON DELETE CASCADE
 );
