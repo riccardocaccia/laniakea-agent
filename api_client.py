@@ -1,11 +1,17 @@
 """
-Thin HTTP client that calls the Laniakea queue API to update deployment status
-uses mutual TLS: the agent presents its client certificate on every request.
-The API never receives DB credentials, all state writes go through this client.
+Calls the Laniakea Queue API to update deployment status.
+Auth: JWT signed with AGENT_MASTER_PASSWORD (HMAC-SHA256).
+      No certificates needed just the shared master password.
+
+HTCondor-style pool password model:
+  - one master password governs all agents
+  - to revoke ALL agents: change the password on API + all agents and restart
 """
 
 import logging
 import os
+import time
+import uuid
 from typing import Optional
 import httpx
 
@@ -13,12 +19,40 @@ logger = logging.getLogger(__name__)
 
 # Base URL of the Laniakea queue API (HTTPS default port)
 API_BASE_URL = os.getenv("LANIAKEA_API_URL", "https://example:8443")
+AGENT_MASTER_PASSWORD = os.getenv("AGENT_MASTER_PASSWORD", "")
+AGENT_ID = os.getenv("AGENT_ID", "laniakea-agent")
 
-# NOTE: to be created and imported on the API
-# paths to the agent's own cert/key and the CA cert to verify the API server
-AGENT_CERT    = os.getenv("AGENT_CERT",    "certs/agent.crt")
-AGENT_KEY     = os.getenv("AGENT_KEY",     "certs/agent.key")
+# NOTE: CA cert to verify the API server's TLS certificate
 AGENT_CA_CERT = os.getenv("AGENT_CA_CERT", "certs/ca.crt")
+
+token_TTLSECOND = 300 # short lived token
+
+# ============================================================
+# Token generation
+# ============================================================
+
+def _mint_token() -> str:
+    """
+    Generate a short-lived JWT signed with the master password.
+
+    Payload:
+      sub  — agent identity (AGENT_ID from .env)
+      iat  — issued at
+      exp  — expires in TOKEN_TTL_SECONDS
+      jti  — unique token ID (UUID4), prevents replay if needed later
+    """
+    if not AGENT_MASTER_PASSWORD:
+        raise RuntimeError("AGENT_MASTER_PASSWORD is not set.")
+
+    now = int(time.time())
+    payload = {
+        "sub": AGENT_ID,
+        "iat": now,
+        "exp": now + TOKEN_TTL_SECONDS,
+        "jti": str(uuid.uuid4()),
+    }
+    return jwt.encode(payload, AGENT_MASTER_PASSWORD, algorithm="HS256")
+
 
 # ============================================================
 # Internal helper
@@ -26,20 +60,23 @@ AGENT_CA_CERT = os.getenv("AGENT_CA_CERT", "certs/ca.crt")
 
 def _make_client() -> httpx.Client:
     """
-    Build an httpx Client configured for mutual TLS.
-
-    cert  = (agent.crt, agent.key)  — identity presented to the API
-    verify = ca.crt                 — CA used to validate the API server cert
-
-    Mirrors exactly how WireGuard uses key pairs: each side authenticates
-    the other with certs signed by the shared CA.  No Bearer token needed.
+    Build an httpx Client with:
+      - Authorization: Bearer <JWT>  for agent authentication
+      - TLS server verification via CA cert (prevents MITM)
     """
+    token = _mint_token()
+
+    # Use the CA cert if it exists, otherwise fall back to system bundle.
+    # The CA cert here verifies the API SERVER certificate — not client auth.
+    verify: str | bool = AGENT_CA_CERT if os.path.exists(AGENT_CA_CERT) else True
+
     return httpx.Client(
         base_url=API_BASE_URL,
-        cert=(AGENT_CERT, AGENT_KEY),
-        verify=AGENT_CA_CERT,
+        headers={"Authorization": f"Bearer {token}"},
+        verify=verify,
         timeout=30,
     )
+
 
 # ============================================================
 # Public interface called by terraform_agent.py

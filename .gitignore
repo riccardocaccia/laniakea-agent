@@ -1,7 +1,5 @@
 .env
 *.key
-*.cnf
-*.csr
 *.crt
 __pycache__/
 *.pem
