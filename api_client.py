@@ -8,6 +8,7 @@ HTCondor-style pool password model:
   - to revoke ALL agents: change the password on API + all agents and restart
 """
 
+import jwt
 import logging
 import os
 import time
@@ -25,7 +26,7 @@ AGENT_ID = os.getenv("AGENT_ID", "laniakea-agent")
 # NOTE: CA cert to verify the API server's TLS certificate
 AGENT_CA_CERT = os.getenv("AGENT_CA_CERT", "certs/ca.crt")
 
-token_TTLSECOND = 300 # short lived token
+TOKEN_TTL_SECONDS = 300 # short lived token
 
 # ============================================================
 # Token generation
@@ -36,10 +37,10 @@ def _mint_token() -> str:
     Generate a short-lived JWT signed with the master password.
 
     Payload:
-      sub  — agent identity (AGENT_ID from .env)
-      iat  — issued at
-      exp  — expires in TOKEN_TTL_SECONDS
-      jti  — unique token ID (UUID4), prevents replay if needed later
+      sub: agent identity (AGENT_ID from .env)
+      iat: issued at
+      exp: expires in TOKEN_TTL_SECONDS
+      jti:  unique token ID
     """
     if not AGENT_MASTER_PASSWORD:
         raise RuntimeError("AGENT_MASTER_PASSWORD is not set.")

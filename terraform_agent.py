@@ -171,8 +171,19 @@ def run_orchestration(job: Job):
 
     logger.info(f"[{uuid}] Provisioning started on {provider} for user {user_sub[:8]}...")
 
-    # Signal to the dashboard: work has started
-    update_deployment_status(uuid, "CREATE_IN_PROGRESS")
+    #check on the password validity
+    # Signal to the dashboard that work has started.
+    # If the API rejects the token (wrong or rotated AGENT_MASTER_PASSWORD)
+    # we abort HERE before touching any cloud resource.
+    # The deployment stays in QUEUED state in the DB — the operator can
+    # fix the password and re-enqueue.
+    ok = update_deployment_status(uuid, "CREATE_IN_PROGRESS")
+    if not ok:
+        raise PermissionError(
+            f"[{uuid}] Unauthorized: AGENT_MASTER_PASSWORD mismatch between agent and API. "
+            f"No cloud resources were created. "
+            f"Fix the password on both sides and re-enqueue the deployment."
+        )    
 
     try:
         client = docker.from_env()

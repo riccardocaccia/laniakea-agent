@@ -1,5 +1,6 @@
 .env
 *.key
+keys/
 *.crt
 __pycache__/
 *.pem
