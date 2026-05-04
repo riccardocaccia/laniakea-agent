@@ -35,11 +35,75 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("orchestrator.log"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+LOG_DIR = os.getenv("DEPLOYMENT_LOG_DIR", "/var/log/laniakea-agent")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# ============================================================
+# Custom handler — pushes each log line to the API
+# ============================================================
+
+class _ApiPushHandler(logging.Handler):
+    """
+    Silently forwards every log record to the API via push_log_line().
+    The API appends each line to logs/orchestrator-{uuid}.log on the API VM,
+    making it readable by the dashboard without exposing the agent VM directly.
+
+    Failures are swallowed — a broken API connection must never crash the agent.
+    """
+
+    def __init__(self, deployment_uuid: str):
+        super().__init__()
+        self._uuid = deployment_uuid
+
+    def emit(self, record: logging.LogRecord) -> None:
+        from api_client import push_log_line  # lazy import avoids circular dep at module load
+        try:
+            push_log_line(self._uuid, record.levelname, self.format(record))
+        except Exception:
+            pass  # never crash the agent over a log push failure
+
+
+# ============================================================
+# Per-deployment logger factory
+# ============================================================
+
+def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
+    """
+    Return a logger bound to a single deployment.
+
+    Writes to three sinks:
+      1. logs/orchestrator-{uuid}.log  — local file on the agent VM (useful for SSH debug)
+      2. API push handler              — POST /internal/deployments/{uuid}/logs on every line
+      3. root StreamHandler            — stdout / systemd journal (via propagate=True)
+    """
+    dep_logger = logging.getLogger(f"deployment.{deployment_uuid}")
+    if dep_logger.handlers:
+        return dep_logger  # already configured for this uuid in this process
+
+    dep_logger.setLevel(logging.INFO)
+    fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+
+    # 1. Local file for direct inspection on the agent VM
+    log_path = os.path.join(LOG_DIR, f"terraform_{deployment_uuid}.log")
+    fh = logging.FileHandler(log_path)
+    fh.setFormatter(fmt)
+    dep_logger.addHandler(fh)
+
+    # 2. API push so the dashboard can read it via GET /api/deployments/{uuid}/logs
+    ph = _ApiPushHandler(deployment_uuid)
+    ph.setFormatter(fmt)
+    dep_logger.addHandler(ph)
+
+    # 3. Propagate to root handled by basicConfig above
+    dep_logger.propagate = True
+
+    return dep_logger
+
 
 # ========================
 # Pydantic models  
@@ -173,18 +237,22 @@ def run_orchestration(job: Job):
 
     #check on the password validity
     # Signal to the dashboard that work has started.
-    # If the API rejects the token (wrong or rotated AGENT_MASTER_PASSWORD)
-    # we abort HERE before touching any cloud resource.
-    # The deployment stays in QUEUED state in the DB — the operator can
-    # fix the password and re-enqueue.
+    # If the API rejects the token abort here before touching any cloud resource.
+    # The deployment stays in QUEUED state in the DB
     ok = update_deployment_status(uuid, "CREATE_IN_PROGRESS")
     if not ok:
         raise PermissionError(
             f"[{uuid}] Unauthorized: AGENT_MASTER_PASSWORD mismatch between agent and API. "
             f"No cloud resources were created. "
             f"Fix the password on both sides and re-enqueue the deployment."
-        )    
+        )
 
+        # NOTE: not sense implementing this 
+        # retry to insert the job in the queue
+        #raise RuntimeError(
+         #   f"[{uuid}] Agent auth failed job released back to queue for retry by another agent."
+
+    
     try:
         client = docker.from_env()
 

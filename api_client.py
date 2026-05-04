@@ -3,7 +3,7 @@ Calls the Laniakea Queue API to update deployment status.
 Auth: JWT signed with AGENT_MASTER_PASSWORD (HMAC-SHA256).
       No certificates needed just the shared master password.
 
-HTCondor-style pool password model:
+pool password model:
   - one master password governs all agents
   - to revoke ALL agents: change the password on API + all agents and restart
 """
@@ -19,19 +19,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Base URL of the Laniakea queue API (HTTPS default port)
-API_BASE_URL = os.getenv("LANIAKEA_API_URL", "https://example:8443")
+API_BASE_URL = os.getenv("LANIAKEA_API_URL", "https://.......:8443")
 AGENT_MASTER_PASSWORD = os.getenv("AGENT_MASTER_PASSWORD", "")
 AGENT_ID = os.getenv("AGENT_ID", "laniakea-agent")
 
 # NOTE: CA cert to verify the API server's TLS certificate
 AGENT_CA_CERT = os.getenv("AGENT_CA_CERT", "certs/ca.crt")
 
+# token lifespan
 TOKEN_TTL_SECONDS = 300 # short lived token
 
-# ============================================================
 # Token generation
-# ============================================================
-
 def _mint_token() -> str:
     """
     Generate a short-lived JWT signed with the master password.
@@ -55,15 +53,12 @@ def _mint_token() -> str:
     return jwt.encode(payload, AGENT_MASTER_PASSWORD, algorithm="HS256")
 
 
-# ============================================================
 # Internal helper
-# ============================================================
-
 def _make_client() -> httpx.Client:
     """
     Build an httpx Client with:
       - Authorization: Bearer <JWT>  for agent authentication
-      - TLS server verification via CA cert (prevents MITM)
+      - TLS server verification via CA cert
     """
     token = _mint_token()
 
@@ -79,9 +74,7 @@ def _make_client() -> httpx.Client:
     )
 
 
-# ============================================================
 # Public interface called by terraform_agent.py
-# ============================================================
 
 def update_deployment_status(
     deployment_uuid: str, new_status: str, status_reason: Optional[str] = None, outputs: Optional[str] = None,)-> bool:
@@ -140,3 +133,24 @@ def update_deployment_status(
             "[%s] Could not reach API to update status: %s", deployment_uuid, exc
         )
         return False
+
+def push_log_line(deployment_uuid: str, level: str, message: str) -> None:
+    """
+    POST /internal/deployments/{uuid}/logs  on the Queue API.
+
+    Sends a single formatted log line so the API can accumulate it in
+    logs/orchestrator-{uuid}.log on the API VM. The dashboard reads that
+    file via GET /api/deployments/{uuid}/logs.
+
+    Failures are silently swallowed.
+    """
+    payload = {
+        "level":   level.upper(),
+        "message": message,
+        }
+    try:
+        with _make_client() as client:
+            client.post(f"/internal/deployments/{deployment_uuid}/logs", json=payload,)
+    except Exception:
+        pass  # never crash the agent because of a log push failure
+
