@@ -1,9 +1,5 @@
 .env
-*.key
-keys/
-*.crt
+dist/
 __pycache__/
-*.pem
-*.log
 .terraform*
 terraform.tfstate*
