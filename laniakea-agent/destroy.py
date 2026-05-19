@@ -1,16 +1,16 @@
 """
-Destroy module — teardown infrastructure on failure or explicit delete.
+Destroy module that teardown infrastructure on failure or explicit delete.
 
 Auth logic for OpenStack (same as terraform_agent):
-  - If job.auth.aai_token is present → exchange it for a Keystone token
-  - Otherwise → use app credentials from Vault
+  - If job.auth.aai_token is present exchange it for a Keystone token
+  - Otherwise use app credentials from Vault
 """
 
 import json
 import os
 import docker
 import logging
-from vault_utils import get_provider_credentials
+from laniakea_agent.vault_utils import get_provider_credentials
 from auth_utils.openstack_auth import get_keystone_token
 
 logger = logging.getLogger(__name__)

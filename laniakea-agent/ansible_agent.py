@@ -1,7 +1,7 @@
 import os
 import stat
 import logging
-from ansible_worker import AnsibleWorker
+from laniakea_agent.ansible_worker import AnsibleWorker
 
 # create a logging istance (for the ansible_agent -> __name__) used for the debugging
 logger = logging.getLogger(__name__)

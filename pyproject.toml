@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "laniakea-api-agent"
+version = "0.0.1"
+description = "Laniakea deployment agent orchestrates cloud deployments via Terraform and Ansible"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+authors = [
+  { name = "rcaccia" }
+]
+
+keywords = ["cloud", "deployment", "openstack", "aws", "terraform", "ansible", "redis"]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+  "pydantic>=2.0.0",
+  "httpx",
+  "hvac>=2.0.0",
+  "docker",
+  "requests",
+  "openstacksdk",
+  "keystoneauth1[openidconnect]",
+  "python-keystoneclient",
+  "redis",
+  "rq",
+  "pyjwt",
+  "python-dotenv",
+  "pyyaml",
+]
+
+[project.scripts]
+laniakea-agent = "laniakea_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/riccardocaccia/laniakea-agent/tree/laniakea-agent-pkg"
+Issues = "https://github.com/riccardocaccia/laniakea-agent/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["laniakea_agent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"worker_wrapper.py" = "worker_wrapper.py"
+

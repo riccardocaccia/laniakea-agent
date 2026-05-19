@@ -23,12 +23,12 @@ import logging
 import time
 from typing import Optional
 from pydantic import BaseModel
-from api_client import update_deployment_status         
-from auth_utils.openstack_auth import get_keystone_token
-from vault_utils import get_provider_credentials
-from ansible_agent import run_ansible_step
-from destroy import run_destroy
-from notifier import send_success, send_failure
+from laniakea_agent.api_client import update_deployment_status         
+from laniakea_agent.auth_utils.openstack_auth import get_keystone_token
+from laniakea_agent.vault_utils import get_provider_credentials
+from laniakea_agent.ansible_agent import run_ansible_step
+from laniakea_agent.destroy import run_destroy
+from laniakea_agent.notifier import send_success, send_failure
 
 # Logging configuration for debugging. Prints custom debug messages to help the debug process
 logging.basicConfig(
@@ -43,9 +43,9 @@ logger = logging.getLogger(__name__)
 LOG_DIR = os.getenv("DEPLOYMENT_LOG_DIR", "/var/log/laniakea-agent")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ============================================================
-# Custom handler — pushes each log line to the API
-# ============================================================
+####################################
+# Pushes each log line to the API
+####################################
 
 class _ApiPushHandler(logging.Handler):
     """
@@ -68,9 +68,9 @@ class _ApiPushHandler(logging.Handler):
             pass  # never crash the agent over a log push failure
 
 
-# ============================================================
+########################################
 # Per-deployment logger factory
-# ============================================================
+########################################
 
 def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
     """
@@ -99,15 +99,15 @@ def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
     ph.setFormatter(fmt)
     dep_logger.addHandler(ph)
 
-    # 3. Propagate to root handled by basicConfig above
+    # 3 propagate to root handled by basicConfig above
     dep_logger.propagate = True
 
     return dep_logger
 
 
-# ========================
+######################
 # Pydantic models  
-# ========================
+######################
 
 class OpenPort(BaseModel):
     """
@@ -203,9 +203,9 @@ class Job(BaseModel):
     def get_username(self) -> str:
         return self.requested_by or self.auth.sub[:8]
 
-# ============================================================
+##################
 # Orchestration
-# ============================================================
+##################
 
 def run_orchestration(job: Job):
     """
