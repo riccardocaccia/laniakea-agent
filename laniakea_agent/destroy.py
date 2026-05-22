@@ -11,7 +11,7 @@ import os
 import docker
 import logging
 from laniakea_agent.vault_utils import get_provider_credentials
-from auth_utils.openstack_auth import get_keystone_token
+from laniakea_agent.auth_utils.openstack_auth import get_keystone_token
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,4 @@
-from vault_utils import get_secrets
+from laniakea_agent.vault_utils import get_secrets
 import logging
 
 logger = logging.getLogger(__name__)
