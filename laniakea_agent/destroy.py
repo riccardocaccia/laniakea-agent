@@ -1,5 +1,9 @@
 """
-Destroy module that teardown infrastructure on failure or explicit delete.
+Removes ALL resources created by Terraform:
+  - VM instance
+  - SSH keypair
+  - Security groups
+  - Floating IP (if any)
 
 Auth logic for OpenStack (same as terraform_agent):
   - If job.auth.aai_token is present exchange it for a Keystone token
@@ -10,10 +14,32 @@ import json
 import os
 import docker
 import logging
+import laniakea_agent as _pkg
 from laniakea_agent.vault_utils import get_provider_credentials
 from laniakea_agent.auth_utils.openstack_auth import get_keystone_token
 
 logger = logging.getLogger(__name__)
+
+#  Terraform provider map (same as terraform_agent.py) 
+_PKG_TERRAFORM = os.path.join(os.path.dirname(_pkg.__file__), "terraform")
+
+PROVIDER_TERRAFORM_MAP: dict = {
+    "openstack":       os.path.join(_PKG_TERRAFORM, "openstack_recas"),
+    "openstack_recas": os.path.join(_PKG_TERRAFORM, "openstack_recas"),
+    "openstack_garr":  os.path.join(_PKG_TERRAFORM, "openstack_garr"),
+    "aws":             os.path.join(_PKG_TERRAFORM, "aws"),
+}
+
+
+def _resolve_tf_dir(provider: str, template_path: str) -> str:
+    tf_dir = PROVIDER_TERRAFORM_MAP.get(template_path) or PROVIDER_TERRAFORM_MAP.get(provider)
+    if not tf_dir or not os.path.isdir(tf_dir):
+        raise Exception(
+            f"No terraform config found for provider='{provider}' "
+            f"template='{template_path}'. "
+            f"Available: {list(PROVIDER_TERRAFORM_MAP.keys())}"
+        )
+    return tf_dir
 
 
 def run_destroy(job):
@@ -21,15 +47,22 @@ def run_destroy(job):
     provider = job.selected_provider.lower()
     user_sub = job.get_sub()
 
-    if provider == 'openstack':
-        tf_dir = os.path.abspath(job.cloud_providers.openstack.template.path)
-    elif provider == 'aws':
-        tf_dir = os.path.abspath(job.cloud_providers.aws.template.path)
-    else:
-        logger.error(f"[{uuid}] Unknown provider: {provider}")
+    # resolve terraform config dir from the installed package
+    try:
+        if provider == 'openstack':
+            template_path = job.cloud_providers.openstack.template.path
+        elif provider == 'aws':
+            template_path = job.cloud_providers.aws.template.path
+        else:
+            logger.error(f"[{uuid}] Unknown provider: {provider}")
+            return
+
+        tf_dir = _resolve_tf_dir(provider, template_path)
+    except Exception as exc:
+        logger.error(f"[{uuid}] Cannot resolve terraform dir for destroy: {exc}")
         return
 
-    logger.info(f"[{uuid}] Starting DESTROY on {provider}...")
+    logger.info(f"[{uuid}] Starting DESTROY on {provider} ({tf_dir})...")
 
     try:
         client  = docker.from_env()
@@ -51,8 +84,6 @@ def run_destroy(job):
             app_cred_id     = ""
             app_cred_secret = ""
 
-            # NOTE: find a way to manage app credential and aai token
-            # AAI token rules over app credential
             if job.auth.aai_token and job.auth.aai_token.strip():
                 logger.info(f"[{uuid}] AAI token found — exchanging for Keystone token (destroy)...")
                 os_token = get_keystone_token(
@@ -61,20 +92,16 @@ def run_destroy(job):
                     os_data.os_project_id,
                 )
                 if not os_token:
-                    logger.warning(f"[{uuid}] AAI → Keystone exchange failed during destroy, trying app credentials...")
+                    logger.warning(f"[{uuid}] AAI → Keystone exchange failed, trying app credentials...")
                     app_cred_id     = secrets.get("app_credential_id", "")
                     app_cred_secret = secrets.get("app_credential_secret", "")
             else:
-                # No AAI token → use app credentials from Vault
                 logger.info(f"[{uuid}] No AAI token — using app credentials from Vault (destroy)...")
                 app_cred_id     = secrets.get("app_credential_id", "")
                 app_cred_secret = secrets.get("app_credential_secret", "")
-                
-                # error
                 if not app_cred_id or not app_cred_secret:
                     logger.error(
-                        f"[{uuid}] No AAI token and no app credentials in Vault — "
-                        "destroy may fail."
+                        f"[{uuid}] No AAI token and no app credentials — destroy may fail."
                     )
 
             proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
@@ -91,7 +118,7 @@ def run_destroy(job):
                 "TF_VAR_endpoint_network":     os_data.endpoint_overrides_network,
                 "TF_VAR_endpoint_volumev3":    os_data.endpoint_overrides_volumev3,
                 "TF_VAR_endpoint_image":       os_data.endpoint_overrides_image,
-                "TF_VAR_flavor_name":          "dummy",                              # placeholder
+                "TF_VAR_flavor_name":          os_data.inputs.flavor,
                 "TF_VAR_network_type":         os_data.inputs.network_type,
                 "TF_VAR_bastion_ip":           proxy_host,
             })
@@ -102,9 +129,8 @@ def run_destroy(job):
                 "TF_VAR_aws_access_key": secrets.get("access_key", ""),
                 "TF_VAR_aws_secret_key": secrets.get("secret_key", ""),
                 "TF_VAR_aws_region":     aws_data.region,
-                "TF_VAR_instance_type":  "t3.micro",
-                "TF_VAR_storage_size":   "20",
-                "TF_VAR_network_type":   "public",
+                "TF_VAR_instance_type":  aws_data.inputs.instance_type,
+                "TF_VAR_network_type":   aws_data.inputs.network_type,
                 "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "0.0.0.0",
             })
 
@@ -121,3 +147,4 @@ def run_destroy(job):
 
     except Exception as e:
         logger.error(f"[{uuid}] CRITICAL ERROR during destroy on {provider}: {e}")
+
