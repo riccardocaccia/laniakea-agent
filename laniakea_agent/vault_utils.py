@@ -59,6 +59,7 @@ def get_provider_credentials(user_sub: str, provider: str) -> dict:
     if provider == "openstack":
         return {
             "ssh_key":               all_creds.get("openstack_ssh_key"),
+            "ssh_private_key":       all_creds.get("ssh_private_key"),   
             "proxy_host":            all_creds.get("openstack_proxy_host", "0.0.0.0"),
             "app_credential_id":     all_creds.get("openstack_app_credential_id"),
             "app_credential_secret": all_creds.get("openstack_app_credential_secret"),
@@ -67,6 +68,7 @@ def get_provider_credentials(user_sub: str, provider: str) -> dict:
     elif provider == "aws":
         return {
             "ssh_key":    all_creds.get("aws_ssh_key"),
+            "ssh_private_key":       all_creds.get("ssh_private_key"),            
             "access_key": all_creds.get("aws_access_key"),
             "secret_key": all_creds.get("aws_secret_key"),
             "bastion_ip": all_creds.get("aws_bastion_ip", "0.0.0.0"),
