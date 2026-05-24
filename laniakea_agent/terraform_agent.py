@@ -5,7 +5,6 @@ State management:
   All deployment state writes go through the API via api_client.update_deployment_status()
   The agent has NO direct database access!
 
-WARNING: improve this logic, now I have application credentials only for GARR
 Auth logic for OpenStack:
   - If job.auth.aai_token is present exchange it for a Keystone token
   - Otherwise use app credentials from Vault
@@ -23,144 +22,126 @@ import logging
 import time
 from typing import Optional
 from pydantic import BaseModel
-from laniakea_agent.api_client import update_deployment_status         
+from laniakea_agent.api_client import update_deployment_status, push_log_line
 from laniakea_agent.auth_utils.openstack_auth import get_keystone_token
 from laniakea_agent.vault_utils import get_provider_credentials
 from laniakea_agent.ansible_agent import run_ansible_step
 from laniakea_agent.destroy import run_destroy
 from laniakea_agent.notifier import send_success, send_failure
 
-# Logging configuration for debugging. Prints custom debug messages to help the debug process
+# Logging
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 LOG_DIR = os.getenv("DEPLOYMENT_LOG_DIR", "/var/log/laniakea-agent")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-####################################
-# Pushes each log line to the API
-####################################
+# Terraform provider map 
+# Maps provider/template names to the terraform config directory inside the
+# installed package. Adding a new provider = add one line here.
+
+import laniakea_agent as _pkg
+_PKG_TERRAFORM = os.path.join(os.path.dirname(_pkg.__file__), "terraform")
+
+PROVIDER_TERRAFORM_MAP: dict = {
+    # openstack aliases
+    "openstack":        os.path.join(_PKG_TERRAFORM, "openstack_recas"),
+    "openstack_recas":  os.path.join(_PKG_TERRAFORM, "openstack_recas"),
+    "openstack_garr":   os.path.join(_PKG_TERRAFORM, "openstack_garr"),
+    # aws
+    "aws":              os.path.join(_PKG_TERRAFORM, "aws"),
+}
+
+# API push log handler 
 
 class _ApiPushHandler(logging.Handler):
     """
     Silently forwards every log record to the API via push_log_line().
-    The API appends each line to logs/orchestrator-{uuid}.log on the API VM,
-    making it readable by the dashboard without exposing the agent VM directly.
-
     Failures are swallowed — a broken API connection must never crash the agent.
     """
-
     def __init__(self, deployment_uuid: str):
         super().__init__()
         self._uuid = deployment_uuid
 
     def emit(self, record: logging.LogRecord) -> None:
-        from api_client import push_log_line  # lazy import avoids circular dep at module load
         try:
             push_log_line(self._uuid, record.levelname, self.format(record))
         except Exception:
-            pass  # never crash the agent over a log push failure
+            pass
 
-
-########################################
-# Per-deployment logger factory
-########################################
 
 def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
     """
     Return a logger bound to a single deployment.
-
-    Writes to three sinks:
-      1. logs/orchestrator-{uuid}.log  — local file on the agent VM (useful for SSH debug)
-      2. API push handler              — POST /internal/deployments/{uuid}/logs on every line
-      3. root StreamHandler            — stdout / systemd journal (via propagate=True)
+    Writes to: local file + API push + stdout.
     """
     dep_logger = logging.getLogger(f"deployment.{deployment_uuid}")
     if dep_logger.handlers:
-        return dep_logger  # already configured for this uuid in this process
+        return dep_logger
 
     dep_logger.setLevel(logging.INFO)
     fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 
-    # 1. Local file for direct inspection on the agent VM
+    # 1. local file
     log_path = os.path.join(LOG_DIR, f"terraform_{deployment_uuid}.log")
     fh = logging.FileHandler(log_path)
     fh.setFormatter(fmt)
     dep_logger.addHandler(fh)
 
-    # 2. API push so the dashboard can read it via GET /api/deployments/{uuid}/logs
+    # 2. API push
     ph = _ApiPushHandler(deployment_uuid)
     ph.setFormatter(fmt)
     dep_logger.addHandler(ph)
 
-    # 3 propagate to root handled by basicConfig above
+    # 3. propagate to root (stdout)
     dep_logger.propagate = True
 
     return dep_logger
 
 
-######################
-# Pydantic models  
-######################
+# Pydantic models 
 
 class OpenPort(BaseModel):
-    """
-    Class specifically used for a specific input that user can specify:
-
-    - which port to open in the deployed machine.
-    """
     port:     int
     protocol: str
     cidr:     str
 
 class AuthConfig(BaseModel):
-    """
-    AAI token class.
-    """
     aai_token: Optional[str] = None
     sub:       str
     group:     str = "default"
 
 class OpenStackInputs(BaseModel):
-    """
-    OpenStack required inpusts for the customization of the VM.
-    """
     flavor:       str
     image:        str
     network_type: str = "private"
     open_ports:   list[OpenPort] = []
 
 class AWSInputs(BaseModel):
-    """
-    AWS required inpusts for the customization of the VM.
-    """
     instance_type: str
     image:         str
-    network_type:  str = "public"        # NOTE: see which is better by default
+    network_type:  str = "public"      # NOTE: see what is the best choice
     open_ports:    list[OpenPort] = []
 
 class TemplateConfig(BaseModel):
-    #NOTE: I already have repo_url.yml is it necessary??
     """
-    Template configuration informations.
+    template.path selects which terraform config to use.
+    Valid values: openstack, openstack_recas, openstack_garr, aws.
+    The path is resolved against the installed package — no local files needed.
     """
     url:    str = ""
-    path:   str = "terraform/openstack"
+    path:   str = "openstack_recas"   # default provider
     branch: str = "main"
 
 class OpenStackProvider(BaseModel):
-    """
-    OpenStack PROVIDER information used for the deployment.
-    """
     os_auth_url:                 str
     os_project_id:               str
-    region_name:                 str = "RegionOne"     # NOTE: these defualt work only for recas
+    region_name:                 str = "RegionOne"       # NOTE: these choice works only for recas (default prov.) is ok? 
     private_net_name:            str = "private_net"
     public_net_name:             str = "public_net"
     endpoint_overrides_network:  str
@@ -171,12 +152,9 @@ class OpenStackProvider(BaseModel):
     inputs:                      OpenStackInputs
 
 class AWSProvider(BaseModel):
-    """
-    AWS PROVIDER information used for the deployment.
-    """
     region:     str
     bastion_ip: Optional[str] = None
-    template:   TemplateConfig = TemplateConfig(path="terraform/aws")
+    template:   TemplateConfig = TemplateConfig(path="aws")
     inputs:     AWSInputs
 
 class CloudProviders(BaseModel):
@@ -184,17 +162,13 @@ class CloudProviders(BaseModel):
     openstack: Optional[OpenStackProvider] = None
 
 class Job(BaseModel):
-    """
-    Basic job despcription containing an unique uuid and other useful
-    information for the deployment.
-    """
     deployment_uuid:   str
     auth:              AuthConfig
     selected_provider: str
     cloud_providers:   CloudProviders
     user_sub:          Optional[str] = None
-    user_email:        Optional[str] = None  # added from api in job_data
-    requested_by:      Optional[str] = None  # username
+    user_email:        Optional[str] = None
+    requested_by:      Optional[str] = None
     vm_ip:             Optional[str] = None
 
     def get_sub(self) -> str:
@@ -203,42 +177,67 @@ class Job(BaseModel):
     def get_username(self) -> str:
         return self.requested_by or self.auth.sub[:8]
 
-##################
-# Orchestration
-##################
+
+# Orchestration 
+
+def _resolve_tf_dir(provider: str, template_path: str) -> str:
+    """
+    Resolve the terraform config directory from the installed package.
+
+    Priority:
+      1. template.path exact match in PROVIDER_TERRAFORM_MAP (e.g. "openstack_garr")
+      2. provider name match (e.g. "openstack" → openstack_recas default)
+      3. Raise if nothing found.
+    """
+    # try the explicit template path first (e.g. "openstack_garr")
+    tf_dir = PROVIDER_TERRAFORM_MAP.get(template_path)
+    # fall back to provider name (e.g. "openstack")
+    if not tf_dir:
+        tf_dir = PROVIDER_TERRAFORM_MAP.get(provider)
+    if not tf_dir or not os.path.isdir(tf_dir):
+        raise Exception(
+            f"No terraform config found for provider='{provider}' "
+            f"template='{template_path}'. "
+            f"Available: {list(PROVIDER_TERRAFORM_MAP.keys())}"
+        )
+    return tf_dir
+
 
 def run_orchestration(job: Job):
     """
-    Lifecycle of a cloud deployment.
+    End-to-end lifecycle of a cloud deployment.
 
-    State transitions reported to the API:
-      QUEUED: 
-        -> CREATE_IN_PROGRESS  (agent starts)
-        -> CREATE_COMPLETE     (all steps succeeded)
-        -> CREATE_FAILED       (any step failed, VM destroyed)
-        -> UPDATE_...          (TODO)
+    State transitions:
+      QUEUED → CREATE_IN_PROGRESS → CREATE_COMPLETE
+                                  → CREATE_FAILED
     """
     uuid     = job.deployment_uuid
     provider = job.selected_provider.lower()
     user_sub = job.get_sub()
     email    = job.user_email
     username = job.get_username()
+    dlog     = _get_deployment_logger(uuid)
 
-    if provider == 'openstack':
-        tf_dir = os.path.abspath(job.cloud_providers.openstack.template.path)
-    elif provider == 'aws':
-        tf_dir = os.path.abspath(job.cloud_providers.aws.template.path)
-    else:
-        logger.error(f"[{uuid}] Unknown provider: {provider}")
-        update_deployment_status(uuid, "CREATE_FAILED", status_reason=f"Unknown provider: {provider}")
+    # resolve terraform config dir from the installed package
+    try:
+        if provider == 'openstack':
+            template_path = job.cloud_providers.openstack.template.path
+        elif provider == 'aws':
+            template_path = job.cloud_providers.aws.template.path
+        else:
+            raise Exception(f"Unknown provider: {provider}")
+
+        tf_dir = _resolve_tf_dir(provider, template_path)
+        dlog.info(f"[{uuid}] Terraform config: {tf_dir}")
+
+    except Exception as exc:
+        dlog.error(f"[{uuid}] Provider resolution failed: {exc}")
+        update_deployment_status(uuid, "CREATE_FAILED", status_reason=str(exc))
         return
 
-    logger.info(f"[{uuid}] Provisioning started on {provider} for user {user_sub[:8]}...")
+    dlog.info(f"[{uuid}] Provisioning started on {provider} for user {user_sub[:8]}...")
 
-    #check on the password validity
-    # Signal to the dashboard that work has started.
-    # If the API rejects the token abort here before touching any cloud resource.
-    # The deployment stays in QUEUED state in the DB
+    # auth check if API rejects the token abort before touching cloud resources
     ok = update_deployment_status(uuid, "CREATE_IN_PROGRESS")
     if not ok:
         raise PermissionError(
@@ -247,17 +246,10 @@ def run_orchestration(job: Job):
             f"Fix the password on both sides and re-enqueue the deployment."
         )
 
-        # NOTE: not sense implementing this 
-        # retry to insert the job in the queue
-        #raise RuntimeError(
-         #   f"[{uuid}] Agent auth failed job released back to queue for retry by another agent."
-
-    
     try:
         client = docker.from_env()
 
-        # vault reading
-        logger.info(f"[{uuid}] Reading credentials from Vault...")
+        dlog.info(f"[{uuid}] Reading credentials from Vault...")
         secrets = get_provider_credentials(user_sub, provider)
         ssh_key = secrets.get("ssh_key")
         if not ssh_key:
@@ -275,7 +267,7 @@ def run_orchestration(job: Job):
             app_cred_secret = ""
 
             if job.auth.aai_token and job.auth.aai_token.strip():
-                logger.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
+                dlog.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
                 os_token = get_keystone_token(
                     job.auth.aai_token,
                     os_data.os_auth_url,
@@ -284,7 +276,7 @@ def run_orchestration(job: Job):
                 if not os_token:
                     raise Exception("Keystone token exchange failed.")
             else:
-                logger.info(f"[{uuid}] No AAI token: using app credentials from Vault...")
+                dlog.info(f"[{uuid}] No AAI token: using app credentials from Vault...")
                 app_cred_id     = secrets.get("app_credential_id", "")
                 app_cred_secret = secrets.get("app_credential_secret", "")
                 if not app_cred_id or not app_cred_secret:
@@ -316,10 +308,8 @@ def run_orchestration(job: Job):
 
         elif provider == 'aws':
             aws_data   = job.cloud_providers.aws
-            # SECRET
             access_key = secrets.get("access_key")
             secret_key = secrets.get("secret_key")
-
             if not access_key or not secret_key:
                 raise Exception("AWS access_key or secret_key not found in Vault credentials!")
 
@@ -335,8 +325,7 @@ def run_orchestration(job: Job):
             })
 
         # Terraform apply
-        logger.info(f"[{uuid}] Running Terraform container for {provider}...")
-        # Docker informations
+        dlog.info(f"[{uuid}] Running Terraform container for {provider} ({tf_dir})...")
         client.containers.run(
             image="hashicorp/terraform:1.5",
             entrypoint="/bin/sh",
@@ -347,61 +336,59 @@ def run_orchestration(job: Job):
             remove=True,
         )
 
-        #retrieve VM IP
-        logger.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
+        # retrieve VM IP
+        dlog.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
         vm_ip_bytes = client.containers.run(
             image="hashicorp/terraform:1.5",
             command="output -raw vm_ip",
-            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},  # read only mode 
+            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},
             working_dir="/src",
             remove=True,
         )
-
-        # converting the ip to human-readable
         vm_ip     = vm_ip_bytes.decode('utf-8').strip()
         job.vm_ip = vm_ip
 
-        # wait for the vm to boot
-        logger.info(f"[{uuid}] Waiting 30s for SSH on Rocky...")
+        dlog.info(f"[{uuid}] Waiting 30s for SSH on Rocky...")
         time.sleep(30)
-        logger.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
+        dlog.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
 
         # Ansible configuration
-        with open("repo_url_template.yml", "r") as yf:
+        # resolve repo_url_template.yml from the installed package
+        _repo_url_tpl = os.path.join(os.path.dirname(_pkg.__file__), "repo_url_template.yml")
+        with open(_repo_url_tpl, "r") as yf:
             tpl = yaml.safe_load(yf)
 
         pb_url  = tpl['resources']['ansible']['playbook']
         req_url = tpl['resources']['ansible']['requirements']
 
-        # Safe fail in ansible_agent.py -> run_amsible_step()
         ansible_ok = run_ansible_step(job, pb_url, req_url)
 
         if not ansible_ok:
-            logger.error(f"[{uuid}] Ansible failed: running emergency destroy...")
-            run_destroy(job)    # clean the broken VM
+            dlog.error(f"[{uuid}] Ansible failed: running emergency destroy...")
+            run_destroy(job)
             update_deployment_status(
                 uuid, "CREATE_FAILED",
                 status_reason="Configuration step (Ansible) failed. Resources destroyed.",
             )
             send_failure(email, username, uuid, reason="Configuration step (Ansible) failed. Resources have been cleaned up.")
         else:
-            # report success with vm_ip stored in outputs field
             update_deployment_status(
                 uuid, "CREATE_COMPLETE",
                 outputs=json.dumps({"vm_ip": vm_ip}),
             )
-            logger.info(f"[{uuid}] Deployment completed successfully.")
+            dlog.info(f"[{uuid}] Deployment completed successfully.")
             send_success(email, username, uuid, vm_ip=vm_ip)
 
     except Exception as e:
-        logger.error(f"[{uuid}] Critical error: {e}")
-        run_destroy(job)      # clean the broken VM
+        dlog.error(f"[{uuid}] Critical error: {e}")
+        run_destroy(job)
         update_deployment_status(uuid, "CREATE_FAILED", status_reason=str(e))
         send_failure(email, username, uuid, reason=str(e))
 
-# main
+
 if __name__ == "__main__":
     with open("deployment_info.json", "r") as f:
         raw_data = json.load(f)
     job = Job(**raw_data)
     run_orchestration(job)
+
