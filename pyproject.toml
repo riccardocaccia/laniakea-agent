@@ -54,5 +54,5 @@ Issues = "https://github.com/riccardocaccia/laniakea-agent/issues"
 packages = ["laniakea_agent"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"worker_wrapper.py" = "worker_wrapper.py"
+"worker_wrapper.py" = "wlaniakea_api_agent/orker_wrapper.py"
 
