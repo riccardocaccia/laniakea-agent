@@ -52,7 +52,3 @@ Issues = "https://github.com/riccardocaccia/laniakea-agent/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["laniakea_agent"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"worker_wrapper.py" = "laniakea_agent/worker_wrapper.py"
-
