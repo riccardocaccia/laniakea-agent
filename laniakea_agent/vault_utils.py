@@ -13,23 +13,22 @@ import hvac
 
 logger = logging.getLogger(__name__)
 
+# NOTE: keep? secret is okay? 
+VAULT_MOUNT = "secret"
 # NOTE: keep the default? maybe as localhost
-VAULT_ADDR       = os.getenv("VAULT_ADDR", "")
-VAULT_TOKEN      = os.getenv("VAULT_READER_TOKEN", "")
-VAULT_TLS_VERIFY = os.getenv("VAULT_TLS_VERIFY", "false").lower() == "true"
-VAULT_MOUNT      = "secret"
-
-
 def get_vault_client() -> hvac.Client:
-    client = hvac.Client(
-        url=VAULT_ADDR,
-        token=VAULT_TOKEN,
-        verify=VAULT_TLS_VERIFY,
-    )
-    #if not client.is_authenticated():
-    #    raise RuntimeError("Vault: authentication failed — check VAULT_READER_TOKEN")
-    return client
+    vault_addr  = os.getenv("VAULT_ADDR", "")
+    vault_token = os.getenv("VAULT_READER_TOKEN", "")
+    vault_tls   = os.getenv("VAULT_TLS_VERIFY", "false").lower() == "true"
 
+    if not vault_addr or not vault_token:
+        raise RuntimeError(
+            "Vault: VAULT_ADDR or VAULT_READER_TOKEN not set. "
+            "Check your .env file."
+        )
+
+    client = hvac.Client(url=vault_addr, token=vault_token, verify=vault_tls)
+    return client
 
 def get_user_credentials(user_sub: str) -> dict:
     client     = get_vault_client()
