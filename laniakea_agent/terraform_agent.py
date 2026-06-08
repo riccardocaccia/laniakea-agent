@@ -246,6 +246,29 @@ def run_orchestration(job: Job):
             f"Fix the password on both sides and re-enqueue the deployment."
         )
 
+    # quota check before touching cloud resources
+    from laniakea_agent.quota_check import check_quota, MAX_QUOTA_RETRIES, RETRY_COUNT_FIELD
+
+    retry_count = job.__dict__.get(RETRY_COUNT_FIELD, 0)
+    quota_ok, quota_reason = check_quota(job)
+
+    if not quota_ok:
+        retry_count += 1
+        dlog.warning(f"[{uuid}] Insufficient quota: {quota_reason} (attempt {retry_count}/{MAX_QUOTA_RETRIES})")
+
+        if retry_count >= MAX_QUOTA_RETRIES:
+            update_deployment_status(uuid, "CREATE_FAILED",
+                status_reason=f"No agent with sufficient quota after {MAX_QUOTA_RETRIES} attempts: {quota_reason}")
+            send_failure(email, username, uuid, reason=f"Quota exhausted: {quota_reason}")
+            return
+
+        # re-queue the job with incremented retry count
+        from laniakea_agent.queue_utils import requeue_job
+        requeue_job(job, retry_count)
+        update_deployment_status(uuid, "QUEUED",
+            status_reason=f"Re-queued: insufficient quota ({quota_reason})")
+        return
+
     try:
         client = docker.from_env()
 

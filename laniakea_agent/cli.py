@@ -90,6 +90,39 @@ def main():
     print(f"[agent] api:   {os.getenv('LANIAKEA_API_URL')}")
     print(f"[agent] id:    {os.getenv('AGENT_ID', 'laniakea-agent')}")
 
+    # start heartbeat loop in background thread
+    import threading
+    from laniakea_agent.quota_check import send_heartbeat
+
+    os_auth_url = os.getenv("OS_AUTH_URL", "")
+    os_region   = os.getenv("OS_REGION_NAME", "RegionOne")
+    provider    = os.getenv("AGENT_PROVIDER", "openstack")
+
+    def _heartbeat_loop():
+        import time
+        agent_id = os.getenv("AGENT_ID", "laniakea-agent")
+        while True:
+            try:
+                from laniakea_agent.vault_utils import get_provider_credentials
+                # heartbeat uses a generic sub — admin credentials
+                secrets = get_provider_credentials(
+                    os.getenv("HEARTBEAT_USER_SUB", ""), provider
+                )
+                send_heartbeat(
+                    agent_id=agent_id,
+                    provider=provider,
+                    secrets=secrets,
+                    os_auth_url=os_auth_url,
+                    region=os_region,
+                )
+            except Exception:
+                pass
+            time.sleep(30)
+
+    hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    hb_thread.start()
+    print(f"[agent] heartbeat loop started (every 30s)")
+
     Worker(queues, connection=redis_conn).work()
 
 if __name__ == "__main__":
