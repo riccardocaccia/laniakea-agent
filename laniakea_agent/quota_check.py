@@ -1,11 +1,13 @@
 """
 Two responsibilities:
-  1. check_quota: called at job pickup before Terraform.
-     Reads LIVE quota from OpenStack and compares with job requirements.
-     Returns (ok: bool, reason: str).
 
-  2. send_heartbeat(agent_id, provider, secrets) — called every 30s by the CLI.
-     Reads current quota and POSTs to POST /internal/agents/heartbeat on the API.
+  1. check_quota: called at job pickup before Terraform.
+     Reads LIVE quota from OpenStack using the Keystone token already
+     exchanged from the AAI token. Returns (ok: bool, reason: str).
+
+  2. send_heartbeat(agent_id, provider, os_auth_url, region, os_token)
+     called every 30s by the CLI heartbeat loop.
+     Reads current quota and POSTs to POST /internal/agents/heartbeat.
      Failures are silently swallowed — a broken API must never crash the agent.
 """
 
@@ -15,94 +17,102 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# How many times a job can be re-queued before being marked CREATE_FAILED
 MAX_QUOTA_RETRIES = int(os.getenv("QUOTA_MAX_RETRIES", "3"))
-
-# Field name in the job dict that tracks how many times it was re-queued
 RETRY_COUNT_FIELD = "_quota_retry_count"
 
 
-# OpenStack quota helper
-def _get_openstack_quota(os_auth_url: str, os_token: str,
-                         app_cred_id: str, app_cred_secret: str,
-                         region: str) -> Optional[dict]:
+def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Optional[dict]:
     """
-    Read current available quota from OpenStack.
-    Returns dict with available instances, ram, cores, floating_ips.
+    Read current available quota from OpenStack using a Keystone token.
+    Returns dict with available compute + optional network/volume resources.
     Returns None if the call fails.
     """
+    if not os_token:
+        logger.warning("[quota] No Keystone token available for quota check")
+        return None
+
     try:
         import openstack
         conn = openstack.connect(
-            auth_url=os_auth_url,
-            auth_type="v3applicationcredential",
-            application_credential_id=app_cred_id,
-            application_credential_secret=app_cred_secret,
-            region_name=region,
-        ) if app_cred_id else openstack.connect(
             auth_url=os_auth_url,
             token=os_token,
             region_name=region,
         )
 
         limits = conn.compute.get_limits()
-        absolute = limits.absolute
+        ab = limits.absolute
 
-        return {
-            "instances_available":    absolute.max_total_instances - absolute.total_instances_used,
-            "ram_mb_available":       absolute.max_total_ram_size   - absolute.total_ram_used,
-            "cores_available":        absolute.max_total_cores       - absolute.total_cores_used,
-            "floating_ips_available": absolute.max_total_floating_ips - absolute.total_floating_ips_used,
+        quota = {
+            "instances_available": ab.max_total_instances - ab.total_instances_used,
+            "cores_available":     ab.max_total_cores     - ab.total_cores_used,
+            "ram_mb_available":    ab.max_total_ram_size  - ab.total_ram_used,
         }
+
+        # Network quota — optional, not all clouds expose this
+        try:
+            net_quota = conn.network.get_quota(conn.current_project_id)
+            quota["security_groups_available"] = (
+                net_quota.security_group - net_quota.security_group_used
+            )
+            quota["networks_available"] = (
+                net_quota.network - net_quota.network_used
+            )
+        except Exception:
+            pass
+
+        # Volume quota — optional
+        try:
+            vol_quota = conn.block_storage.get_quota_set(conn.current_project_id)
+            quota["volumes_available"] = (
+                vol_quota.volumes - vol_quota.volumes_used
+            )
+            quota["volume_storage_available"] = (
+                vol_quota.gigabytes - vol_quota.gigabytes_used
+            )
+        except Exception:
+            pass
+
+        return quota
+
     except Exception as exc:
         logger.warning(f"[quota] Failed to read OpenStack quota: {exc}")
         return None
 
 
-def _flavor_requirements(flavor_name: str, os_auth_url: str,
-                          os_token: str, app_cred_id: str,
-                          app_cred_secret: str, region: str) -> Optional[dict]:
+def _flavor_requirements(
+    flavor_name: str, os_auth_url: str, os_token: str, region: str
+) -> Optional[dict]:
     """
     Look up the flavor to get its RAM and vCPU requirements.
     Returns dict with ram_mb and cores, or None on failure.
     """
+    if not os_token:
+        return None
+
     try:
         import openstack
         conn = openstack.connect(
             auth_url=os_auth_url,
-            auth_type="v3applicationcredential",
-            application_credential_id=app_cred_id,
-            application_credential_secret=app_cred_secret,
-            region_name=region,
-        ) if app_cred_id else openstack.connect(
-            auth_url=os_auth_url,
             token=os_token,
             region_name=region,
         )
-
         flavor = conn.compute.find_flavor(flavor_name)
         if not flavor:
             return None
-        return {
-            "ram_mb": flavor.ram,
-            "cores":  flavor.vcpus,
-        }
+        return {"ram_mb": flavor.ram, "cores": flavor.vcpus}
+
     except Exception as exc:
         logger.warning(f"[quota] Failed to read flavor {flavor_name}: {exc}")
         return None
 
 
-# Public interface
-
 def check_quota(job) -> tuple:
     """
     Check if this agent has enough OpenStack quota to run the job.
+    Uses the Keystone token exchanged from the AAI token in the job.
 
-    Returns (True, "") if quota is sufficient.
-    Returns (False, reason) if not.
-
-    Called by terraform_agent.run_orchestration() before Terraform.
-    If quota is insufficient, the caller decides whether to retry or fail.
+    Returns (True, "") if quota is sufficient or cannot be determined.
+    Returns (False, reason) if quota is provably insufficient.
     """
     provider = job.selected_provider.lower()
 
@@ -111,18 +121,7 @@ def check_quota(job) -> tuple:
         return True, ""
 
     os_data  = job.cloud_providers.openstack
-    user_sub = job.get_sub()
-
-    try:
-        from laniakea_agent.vault_utils import get_provider_credentials
-        secrets = get_provider_credentials(user_sub, provider)
-    except Exception as exc:
-        logger.warning(f"[quota] Could not read credentials for quota check: {exc}")
-        return True, ""  # fail open — let Terraform try
-
-    app_cred_id     = secrets.get("app_credential_id", "")
-    app_cred_secret = secrets.get("app_credential_secret", "")
-    os_token        = ""
+    os_token = ""
 
     if job.auth.aai_token and job.auth.aai_token.strip():
         try:
@@ -130,84 +129,74 @@ def check_quota(job) -> tuple:
             os_token = get_keystone_token(
                 job.auth.aai_token, os_data.os_auth_url, os_data.os_project_id
             ) or ""
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(f"[quota] AAI→Keystone exchange failed: {exc}")
 
-    # read live quota
-    quota = _get_openstack_quota(
-        os_auth_url=os_data.os_auth_url,
-        os_token=os_token,
-        app_cred_id=app_cred_id,
-        app_cred_secret=app_cred_secret,
-        region=os_data.region_name,
-    )
+    if not os_token:
+        logger.warning("[quota] No Keystone token — skipping quota check")
+        return True, ""
+
+    quota = _get_openstack_quota(os_data.os_auth_url, os_token, os_data.region_name)
 
     if quota is None:
-        logger.warning("[quota] Could not read quota: proceeding anyway")
-        return True, ""  # fail open
+        logger.warning("[quota] Could not read quota — skipping")
+        return True, ""
 
-    # need at least 1 instance
+    # Compute — mandatory
     if quota["instances_available"] < 1:
         return False, (
-            f"No instances available (used all quota). "
+            f"No instances available (quota exhausted). "
             f"Available: {quota['instances_available']}"
         )
 
-    # check flavor requirements
     flavor_req = _flavor_requirements(
-        flavor_name=os_data.inputs.flavor,
-        os_auth_url=os_data.os_auth_url,
-        os_token=os_token,
-        app_cred_id=app_cred_id,
-        app_cred_secret=app_cred_secret,
-        region=os_data.region_name,
+        os_data.inputs.flavor, os_data.os_auth_url, os_token, os_data.region_name
     )
-
     if flavor_req:
         if quota["ram_mb_available"] < flavor_req["ram_mb"]:
             return False, (
-                f"Insufficient RAM quota. "
+                f"Insufficient RAM. "
                 f"Need {flavor_req['ram_mb']} MB, available {quota['ram_mb_available']} MB."
             )
         if quota["cores_available"] < flavor_req["cores"]:
             return False, (
-                f"Insufficient core quota. "
-                f"Need {flavor_req['cores']} cores, available {quota['cores_available']}."
+                f"Insufficient cores. "
+                f"Need {flavor_req['cores']}, available {quota['cores_available']}."
             )
 
-    # check floating IP if public network
-    if os_data.inputs.network_type == "public" and quota["floating_ips_available"] < 1:
-        return False, (
-            f"No floating IPs available. "
-            f"Available: {quota['floating_ips_available']}"
-        )
+    # Network — optional, only checked if the cloud exposes it
+    if quota.get("security_groups_available", 1) < 1:
+        return False, "No security groups available (quota exhausted)."
+
+    if quota.get("networks_available", 1) < 1:
+        return False, "No networks available (quota exhausted)."
+
+    # Volume — optional
+    if quota.get("volumes_available", 1) < 1:
+        return False, "No volumes available (quota exhausted)."
 
     logger.info(
-        f"[quota] Quota OK — instances: {quota['instances_available']}, "
-        f"ram: {quota['ram_mb_available']} MB, cores: {quota['cores_available']}"
+        f"[quota] OK — instances: {quota['instances_available']}, "
+        f"cores: {quota['cores_available']}, "
+        f"ram: {quota['ram_mb_available']} MB"
     )
     return True, ""
 
 
-def send_heartbeat(agent_id: str, provider: str, secrets: dict,
-                   os_auth_url: str = "", region: str = "",
-                   os_token: str = "") -> None:
+def send_heartbeat(
+    agent_id: str,
+    provider: str,
+    os_auth_url: str = "",
+    region: str = "",
+    os_token: str = "",
+) -> None:
     """
     Read current quota and POST to /internal/agents/heartbeat.
     Called every 30 seconds by the CLI heartbeat loop.
     Failures are silently swallowed.
     """
     try:
-        app_cred_id     = secrets.get("app_credential_id", "")
-        app_cred_secret = secrets.get("app_credential_secret", "")
-
-        quota = _get_openstack_quota(
-            os_auth_url=os_auth_url,
-            os_token=os_token,
-            app_cred_id=app_cred_id,
-            app_cred_secret=app_cred_secret,
-            region=region,
-        )
+        quota = _get_openstack_quota(os_auth_url, os_token, region) if provider == "openstack" else {}
 
         from laniakea_agent import __version__
         from laniakea_agent.api_client import _make_client

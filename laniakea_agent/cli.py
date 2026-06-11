@@ -46,12 +46,12 @@ def main():
         help="Print version and exit.",
     )
     args = parser.parse_args()
-
+ 
     if args.version:
         from laniakea_agent import __version__
         print(f"laniakea-agent {__version__}")
         sys.exit(0)
-
+ 
     # load .env
     env_path = os.path.abspath(args.env)
     if os.path.exists(env_path):
@@ -59,8 +59,8 @@ def main():
         load_dotenv(env_path)
         print(f"[config] loaded {env_path}")
     else:
-        print(f"[config] .env not found at {env_path} — using environment variables")
-
+        print(f"[config] .env not found at {env_path} using environment variables")
+ 
     # validate required env vars
     missing = [v for v in ["REDIS_HOST", "REDIS_PASSWORD", "AGENT_MASTER_PASSWORD", "LANIAKEA_API_URL"]
                if not os.getenv(v)]
@@ -68,63 +68,63 @@ def main():
         print(f"[error] missing required environment variables: {', '.join(missing)}")
         print("         set them in .env or export them before running laniakea-agent")
         sys.exit(1)
-
+ 
     # default queue
     queue_names = args.queues or ["openstack"]
-
+ 
     # connect Redis
     from redis import Redis
     from rq import Worker, Queue
-
+ 
     redis_conn = Redis(
         host=os.getenv("REDIS_HOST"),
         port=int(os.getenv("REDIS_PORT", "6379")),
         password=os.getenv("REDIS_PASSWORD"),
         decode_responses=False,
     )
-
+ 
     queues = [Queue(name, connection=redis_conn) for name in queue_names]
-
+ 
     print(f"[agent] laniakea-agent listening on queues: {queue_names}")
     print(f"[agent] redis: {os.getenv('REDIS_HOST')}:{os.getenv('REDIS_PORT', '6379')}")
     print(f"[agent] api:   {os.getenv('LANIAKEA_API_URL')}")
     print(f"[agent] id:    {os.getenv('AGENT_ID', 'laniakea-agent')}")
-
+ 
     # start heartbeat loop in background thread
     import threading
     from laniakea_agent.quota_check import send_heartbeat
-
+ 
     os_auth_url = os.getenv("OS_AUTH_URL", "")
     os_region   = os.getenv("OS_REGION_NAME", "RegionOne")
     provider    = os.getenv("AGENT_PROVIDER", "openstack")
-
+ 
     def _heartbeat_loop():
         import time
         agent_id = os.getenv("AGENT_ID", "laniakea-agent")
         while True:
             try:
-                from laniakea_agent.vault_utils import get_provider_credentials
-                # heartbeat uses a generic sub — admin credentials
-                secrets = get_provider_credentials(
-                    os.getenv("HEARTBEAT_USER_SUB", ""), provider
-                )
+                # Heartbeat sends quota info without a user token —
+                # quota will be empty but the heartbeat itself signals
+                # the agent is alive. Per-job quota is checked at pickup
+                # using the user's Keystone token.
                 send_heartbeat(
                     agent_id=agent_id,
                     provider=provider,
-                    secrets=secrets,
                     os_auth_url=os_auth_url,
                     region=os_region,
+                    os_token="",  # no user token available at agent level
                 )
             except Exception:
                 pass
             time.sleep(30)
-
+ 
     hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
     hb_thread.start()
     print(f"[agent] heartbeat loop started (every 30s)")
-
+ 
     Worker(queues, connection=redis_conn).work()
-
+ 
+ 
 if __name__ == "__main__":
     main()
 
