@@ -32,13 +32,13 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
         return None
 
     try:
+        from keystoneauth1.identity import v3
+        from keystoneauth1 import session as ks_session
         import openstack
-        conn = openstack.connect(
-            auth_url=os_auth_url,
-            auth_type="v3token",
-            auth={"token": os_token},
-            region_name=region,
-        )
+
+        token_auth = v3.Token(auth_url=os_auth_url, token=os_token)
+        sess = ks_session.Session(auth=token_auth, verify=False)
+        conn = openstack.connection.Connection(session=sess, region_name=region)
 
         limits = conn.compute.get_limits()
         ab = limits.absolute
@@ -91,13 +91,13 @@ def _flavor_requirements(
         return None
 
     try:
+        from keystoneauth1.identity import v3
+        from keystoneauth1 import session as ks_session
         import openstack
-        conn = openstack.connect(
-            auth_url=os_auth_url,
-            auth_type="v3token",
-            auth={"token": os_token},
-            region_name=region,
-        )
+
+        token_auth = v3.Token(auth_url=os_auth_url, token=os_token)
+        sess = ks_session.Session(auth=token_auth, verify=False)
+        conn = openstack.connection.Connection(session=sess, region_name=region)
         flavor = conn.compute.find_flavor(flavor_name)
         if not flavor:
             return None
