@@ -35,7 +35,8 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
         import openstack
         conn = openstack.connect(
             auth_url=os_auth_url,
-            token=os_token,
+            auth_type="v3token",
+            auth={"token": os_token},
             region_name=region,
         )
 
@@ -93,7 +94,8 @@ def _flavor_requirements(
         import openstack
         conn = openstack.connect(
             auth_url=os_auth_url,
-            token=os_token,
+            auth_type="v3token",
+            auth={"token": os_token},
             region_name=region,
         )
         flavor = conn.compute.find_flavor(flavor_name)
