@@ -9,11 +9,21 @@ Two responsibilities:
      called every 30s by the CLI heartbeat loop.
      Reads current quota and POSTs to POST /internal/agents/heartbeat.
      Failures are silently swallowed — a broken API must never crash the agent.
+
+Implementation note:
+  Uses direct REST calls against Keystone/Nova/Neutron/Cinder via `requests`.
+  Does NOT use the openstack SDK — confirmed via diagnostic that
+  openstack.connection.Connection(session=...) built from a manually
+  constructed keystoneauth1 Session fails to populate the service catalog
+  on this cloud (ReCaS-Bari), even though the token itself is valid and
+  scoped and a raw GET /v3/auth/tokens call returns a full 10-entry catalog.
 """
 
 import logging
 import os
 from typing import Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +31,40 @@ MAX_QUOTA_RETRIES = int(os.getenv("QUOTA_MAX_RETRIES", "3"))
 RETRY_COUNT_FIELD = "_quota_retry_count"
 
 
+def _fetch_token_info(os_auth_url: str, os_token: str) -> dict:
+    """
+    GET /v3/auth/tokens using the token itself as both X-Auth-Token and
+    X-Subject-Token. Returns the 'token' object (project, roles, catalog).
+    Raises on failure.
+    """
+    resp = requests.get(
+        f"{os_auth_url}/auth/tokens",
+        headers={
+            "X-Auth-Token": os_token,
+            "X-Subject-Token": os_token,
+        },
+        verify=False,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json().get("token", {})
+
+
+def _get_catalog_endpoint(catalog: list, svc_type: str, region: str, interface: str = "public") -> Optional[str]:
+    """Extract an endpoint URL from a Keystone service catalog by type/region/interface."""
+    for svc in catalog:
+        if svc.get("type") == svc_type:
+            for ep in svc.get("endpoints", []):
+                ep_region = ep.get("region") or ep.get("region_id")
+                if ep.get("interface") == interface and ep_region == region:
+                    return ep["url"].rstrip("/")
+    return None
+
+
 def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Optional[dict]:
     """
-    Read current available quota from OpenStack using a Keystone token.
+    Read current available quota from OpenStack using a Keystone token,
+    via direct REST calls to Nova/Neutron/Cinder.
     Returns dict with available compute + optional network/volume resources.
     Returns None if the call fails.
     """
@@ -32,46 +73,81 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
         return None
 
     try:
-        from keystoneauth1.identity import v3
-        from keystoneauth1 import session as ks_session
-        import openstack
+        token_info = _fetch_token_info(os_auth_url, os_token)
+        catalog    = token_info.get("catalog", [])
+        project_id = token_info.get("project", {}).get("id", "")
 
-        token_auth = v3.Token(auth_url=os_auth_url, token=os_token)
-        sess = ks_session.Session(auth=token_auth, verify=False)
-        conn = openstack.connection.Connection(session=sess, region_name=region)
+        if not catalog:
+            logger.warning("[quota] Service catalog is empty for this token")
+            return None
 
-        limits = conn.compute.get_limits()
-        ab = limits.absolute
+        # Compute (Nova) — mandatory
+        compute_url = _get_catalog_endpoint(catalog, "compute", region)
+        if not compute_url:
+            logger.warning(f"[quota] No 'compute' endpoint found for region {region}")
+            return None
+
+        limits_resp = requests.get(
+            f"{compute_url}/limits",
+            headers={"X-Auth-Token": os_token},
+            verify=False,
+            timeout=10,
+        )
+        limits_resp.raise_for_status()
+        ab = limits_resp.json()["limits"]["absolute"]
 
         quota = {
-            "instances_available": ab.max_total_instances - ab.total_instances_used,
-            "cores_available":     ab.max_total_cores     - ab.total_cores_used,
-            "ram_mb_available":    ab.max_total_ram_size  - ab.total_ram_used,
+            "instances_available": ab["maxTotalInstances"] - ab["totalInstancesUsed"],
+            "cores_available":     ab["maxTotalCores"]     - ab["totalCoresUsed"],
+            "ram_mb_available":    ab["maxTotalRAMSize"]   - ab["totalRAMUsed"],
         }
 
-        # Network quota — optional, not all clouds expose this
+        # Network (Neutron) — optional
         try:
-            net_quota = conn.network.get_quota(conn.current_project_id)
-            quota["security_groups_available"] = (
-                net_quota.security_group - net_quota.security_group_used
-            )
-            quota["networks_available"] = (
-                net_quota.network - net_quota.network_used
-            )
-        except Exception:
-            pass
+            network_url = _get_catalog_endpoint(catalog, "network", region)
+            if network_url and project_id:
+                net_resp = requests.get(
+                    f"{network_url}/v2.0/quotas/{project_id}/details.json",
+                    headers={"X-Auth-Token": os_token},
+                    verify=False,
+                    timeout=10,
+                )
+                if net_resp.ok:
+                    nq = net_resp.json().get("quota", {})
+                    if "security_group" in nq:
+                        quota["security_groups_available"] = (
+                            nq["security_group"]["limit"] - nq["security_group"]["used"]
+                        )
+                    if "network" in nq:
+                        quota["networks_available"] = (
+                            nq["network"]["limit"] - nq["network"]["used"]
+                        )
+        except Exception as exc:
+            logger.debug(f"[quota] Network quota unavailable: {exc}")
 
-        # Volume quota — optional
+        # Volume (Cinder) — optional. Catalog URL already includes /v3/{project_id}.
         try:
-            vol_quota = conn.block_storage.get_quota_set(conn.current_project_id)
-            quota["volumes_available"] = (
-                vol_quota.volumes - vol_quota.volumes_used
-            )
-            quota["volume_storage_available"] = (
-                vol_quota.gigabytes - vol_quota.gigabytes_used
-            )
-        except Exception:
-            pass
+            volume_url = _get_catalog_endpoint(catalog, "volumev3", region) or \
+                         _get_catalog_endpoint(catalog, "volume", region)
+            if volume_url:
+                vol_resp = requests.get(
+                    f"{volume_url}/os-quota-sets/{project_id}?usage=True",
+                    headers={"X-Auth-Token": os_token},
+                    verify=False,
+                    timeout=10,
+                )
+                if vol_resp.ok:
+                    vq = vol_resp.json().get("quota_set", {})
+                    if "volumes" in vq:
+                        quota["volumes_available"] = (
+                            vq["volumes"]["limit"] - vq["volumes"]["in_use"]
+                        )
+                    if "gigabytes" in vq:
+                        quota["volume_storage_available"] = (
+                            vq["gigabytes"]["limit"] - vq["gigabytes"]["in_use"]
+                        )
+        except Exception as exc:
+            logger.debug(f"[quota] Volume quota unavailable: {exc}")
 
         return quota
 
@@ -84,24 +160,37 @@ def _flavor_requirements(
     flavor_name: str, os_auth_url: str, os_token: str, region: str
 ) -> Optional[dict]:
     """
-    Look up the flavor to get its RAM and vCPU requirements.
+    Look up the flavor RAM and vCPU requirements via direct REST call to Nova.
     Returns dict with ram_mb and cores, or None on failure.
     """
     if not os_token:
         return None
 
     try:
-        from keystoneauth1.identity import v3
-        from keystoneauth1 import session as ks_session
-        import openstack
+        token_info = _fetch_token_info(os_auth_url, os_token)
+        catalog    = token_info.get("catalog", [])
 
-        token_auth = v3.Token(auth_url=os_auth_url, token=os_token)
-        sess = ks_session.Session(auth=token_auth, verify=False)
-        conn = openstack.connection.Connection(session=sess, region_name=region)
-        flavor = conn.compute.find_flavor(flavor_name)
-        if not flavor:
+        compute_url = _get_catalog_endpoint(catalog, "compute", region)
+        if not compute_url:
             return None
-        return {"ram_mb": flavor.ram, "cores": flavor.vcpus}
+
+        # try direct lookup by name (Nova accepts name or ID on /flavors/{id})
+        resp = requests.get(
+            f"{compute_url}/flavors/detail",
+            headers={"X-Auth-Token": os_token},
+            verify=False,
+            timeout=10,
+        )
+        if not resp.ok:
+            return None
+
+        flavors = resp.json().get("flavors", [])
+        flavor  = next((f for f in flavors if f["name"] == flavor_name), None)
+        if not flavor:
+            logger.warning(f"[quota] Flavor '{flavor_name}' not found")
+            return None
+
+        return {"ram_mb": flavor["ram"], "cores": flavor["vcpus"]}
 
     except Exception as exc:
         logger.warning(f"[quota] Failed to read flavor {flavor_name}: {exc}")
