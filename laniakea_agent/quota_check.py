@@ -102,7 +102,7 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
             "ram_mb_available":    ab["maxTotalRAMSize"]   - ab["totalRAMUsed"],
         }
 
-        # Network (Neutron) — optional
+        # Security groups (Neutron) — optional, only checked if the cloud exposes it
         try:
             network_url = _get_catalog_endpoint(catalog, "network", region)
             if network_url and project_id:
@@ -118,36 +118,8 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
                         quota["security_groups_available"] = (
                             nq["security_group"]["limit"] - nq["security_group"]["used"]
                         )
-                    if "network" in nq:
-                        quota["networks_available"] = (
-                            nq["network"]["limit"] - nq["network"]["used"]
-                        )
         except Exception as exc:
-            logger.debug(f"[quota] Network quota unavailable: {exc}")
-
-        # Volume (Cinder) — optional. Catalog URL already includes /v3/{project_id}.
-        try:
-            volume_url = _get_catalog_endpoint(catalog, "volumev3", region) or \
-                         _get_catalog_endpoint(catalog, "volume", region)
-            if volume_url:
-                vol_resp = requests.get(
-                    f"{volume_url}/os-quota-sets/{project_id}?usage=True",
-                    headers={"X-Auth-Token": os_token},
-                    verify=False,
-                    timeout=10,
-                )
-                if vol_resp.ok:
-                    vq = vol_resp.json().get("quota_set", {})
-                    if "volumes" in vq:
-                        quota["volumes_available"] = (
-                            vq["volumes"]["limit"] - vq["volumes"]["in_use"]
-                        )
-                    if "gigabytes" in vq:
-                        quota["volume_storage_available"] = (
-                            vq["gigabytes"]["limit"] - vq["gigabytes"]["in_use"]
-                        )
-        except Exception as exc:
-            logger.debug(f"[quota] Volume quota unavailable: {exc}")
+            logger.debug(f"[quota] Security group quota unavailable: {exc}")
 
         return quota
 
@@ -255,16 +227,9 @@ def check_quota(job) -> tuple:
                 f"Need {flavor_req['cores']}, available {quota['cores_available']}."
             )
 
-    # Network — optional, only checked if the cloud exposes it
+    # Security groups — mandatory (Terraform creates one per deployment)
     if quota.get("security_groups_available", 1) < 1:
         return False, "No security groups available (quota exhausted)."
-
-    if quota.get("networks_available", 1) < 1:
-        return False, "No networks available (quota exhausted)."
-
-    # Volume — optional
-    if quota.get("volumes_available", 1) < 1:
-        return False, "No volumes available (quota exhausted)."
 
     logger.info(
         f"[quota] OK — instances: {quota['instances_available']}, "
