@@ -7,7 +7,7 @@ It does three things:
 
 Usage:
     laniakea-agent-install
-    laniakea-agent-install --workdir /opt/laniakea-agent
+    laniakea-agent-install --workdir /example/laniakea-agent
 """
 
 import argparse
@@ -17,7 +17,9 @@ import subprocess
 
 
 def _add_to_path():
-    """Adds ~/.local/bin to PATH in ~/.bashrc if not already present."""
+    """
+    Adds ~/.local/bin to PATH in ~/.bashrc if not already present
+    """
     bashrc = os.path.expanduser("~/.bashrc")
     line = 'export PATH=$HOME/.local/bin:$PATH'
 
@@ -25,7 +27,7 @@ def _add_to_path():
         with open(bashrc, "r") as f:
             content = f.read()
         if ".local/bin" in content:
-            print("[path] ~/.local/bin already in PATH — skip")
+            print("[path] ~/.local/bin already in PATH... skipping")
             return
     
     with open(bashrc, "a") as f:
@@ -33,16 +35,18 @@ def _add_to_path():
     # also apply immediately to current process
     os.environ["PATH"] = os.path.expanduser("~/.local/bin") + ":" + os.environ.get("PATH", "")
     print(f"[path] added ~/.local/bin to PATH in ~/.bashrc")
-    print(f"[path] PATH updated in the current session — no source ~/.bashrc needed")
+    print(f"[path] PATH updated in the current session")
 
 
 def _create_workdir(workdir: str):
-    """Creates the working directory with the .env template."""
+    """
+    creates the working directory with the .env template
+    """
     os.makedirs(workdir, exist_ok=True)
     env_path = os.path.join(workdir, ".env")
 
     if os.path.exists(env_path):
-        print(f"[workdir] .env already exists in {workdir} — skip")
+        print(f"[workdir] .env already exists in {workdir}... skipping")
     else:
         template = """\
 # ── Agent identity ────────────────────────────────────────────────────────────
@@ -82,10 +86,12 @@ DEPLOYMENT_LOG_DIR=/var/log/laniakea-agent
 
 
 def _create_log_dir():
-    """Creates /var/log/laniakea-agent with correct permissions."""
+    """
+    Creates /var/log/laniakea-agent with correct permissions.
+    """
     log_dir = "/var/log/laniakea-agent"
     if os.path.exists(log_dir):
-        print(f"[logs] {log_dir} already exists — skip")
+        print(f"[logs] {log_dir} already exists... skipping")
         return
 
     try:
@@ -96,11 +102,15 @@ def _create_log_dir():
         os.chown(log_dir, uid, gid)
         print(f"[logs] log directory created: {log_dir}")
     except PermissionError:
-        print(f"[logs] insufficient permissions — please run:")
+        print(f"[logs] insufficient permissions: please run:")
         print(f"       sudo mkdir -p {log_dir} && sudo chown $USER:$USER {log_dir}")
 
 
 def main():
+    """
+    Once the installation is completed this function print
+    a guide for the user.
+    """
     parser = argparse.ArgumentParser(
         prog="laniakea-agent-install",
         description="Initial setup of the VM for laniakea-agent.",

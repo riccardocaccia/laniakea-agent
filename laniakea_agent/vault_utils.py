@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 VAULT_MOUNT = "secret"
 # NOTE: keep the default? maybe as localhost
 def get_vault_client() -> hvac.Client:
+    """
+    It reads the vault address (VAULT_ADDR) and the agent's dedicated 
+    vault token (VAULT_READER_TOKEN). If it doesn't find them in the .env file, 
+    it blocks execution with an immediate error.
+    """
     vault_addr  = os.getenv("VAULT_ADDR", "")
     vault_token = os.getenv("VAULT_READER_TOKEN", "")
     vault_tls   = os.getenv("VAULT_TLS_VERIFY", "false").lower() == "true"
@@ -31,6 +36,13 @@ def get_vault_client() -> hvac.Client:
     return client
 
 def get_user_credentials(user_sub: str) -> dict:
+    """
+    Sends a request to Vault pointing to the user's dedicated Key-Value path: 
+    
+                        secret/data/<USER_ID>/credentials. 
+ 
+    It extracts the dictionary containing all the user's accumulated secrets.
+    """
     client     = get_vault_client()
     vault_path = f"{user_sub}/credentials"
 
@@ -56,6 +68,7 @@ def get_provider_credentials(user_sub: str, provider: str) -> dict:
     provider  = provider.lower()
 
     if provider == "openstack":
+        # NOTE: act here for secret mod.
         return {
             "ssh_key":               all_creds.get("openstack_ssh_key"),
             "ssh_private_key":       all_creds.get("ssh_private_key"),   
@@ -65,12 +78,13 @@ def get_provider_credentials(user_sub: str, provider: str) -> dict:
         }
 
     elif provider == "aws":
+        # NOTE: act here for secret mod.
         return {
-            "ssh_key":    all_creds.get("aws_ssh_key"),
+            "ssh_key":               all_creds.get("aws_ssh_key"),
             "ssh_private_key":       all_creds.get("ssh_private_key"),            
-            "access_key": all_creds.get("aws_access_key"),
-            "secret_key": all_creds.get("aws_secret_key"),
-            "bastion_ip": all_creds.get("aws_bastion_ip", "0.0.0.0"),
+            "access_key":            all_creds.get("aws_access_key"),
+            "secret_key":            all_creds.get("aws_secret_key"),
+            "bastion_ip":            all_creds.get("aws_bastion_ip", "0.0.0.0"),
         }
 
     else:

@@ -27,7 +27,7 @@ variable "bastion_ip" {
 
 variable "image_name" {
   type        = string
-  description = "AMI ID dell'immagine (es. Rocky 9)"
+  description = "AMI ID of the IMAGE (es. Rocky 9)"
 }
 
 variable "instance_type" {
@@ -49,7 +49,7 @@ variable "open_ports" {
   default = []
 }
 
-# Aggiunta per compatibilità con il JSON, anche se non usata direttamente nel main semplice
+#
 variable "network_type" {
   type    = string
   default = "public"

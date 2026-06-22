@@ -5,14 +5,16 @@ Two responsibilities:
      Reads LIVE quota from OpenStack using the Keystone token already
      exchanged from the AAI token. Returns (ok: bool, reason: str).
 
+     TODO: AWS
+
   2. send_heartbeat(agent_id, provider, os_auth_url, region, os_token)
      called every 30s by the CLI heartbeat loop.
      Reads current quota and POSTs to POST /internal/agents/heartbeat.
-     Failures are silently swallowed — a broken API must never crash the agent.
+     Failures are silently swallowed.
 
-Implementation note:
+Implementation note Recas:
   Uses direct REST calls against Keystone/Nova/Neutron/Cinder via `requests`.
-  Does NOT use the openstack SDK — confirmed via diagnostic that
+  Does NOT use the openstack SDK confirmed via diagnostic that
   openstack.connection.Connection(session=...) built from a manually
   constructed keystoneauth1 Session fails to populate the service catalog
   on this cloud (ReCaS-Bari), even though the token itself is valid and
@@ -22,11 +24,11 @@ Implementation note:
 import logging
 import os
 from typing import Optional
-
 import requests
 
 logger = logging.getLogger(__name__)
 
+# Retry count
 MAX_QUOTA_RETRIES = int(os.getenv("QUOTA_MAX_RETRIES", "3"))
 RETRY_COUNT_FIELD = "_quota_retry_count"
 
@@ -51,7 +53,9 @@ def _fetch_token_info(os_auth_url: str, os_token: str) -> dict:
 
 
 def _get_catalog_endpoint(catalog: list, svc_type: str, region: str, interface: str = "public") -> Optional[str]:
-    """Extract an endpoint URL from a Keystone service catalog by type/region/interface."""
+    """
+    Extract an endpoint URL from a Keystone service catalog by type/region/interface.
+    """
     for svc in catalog:
         if svc.get("type") == svc_type:
             for ep in svc.get("endpoints", []):
@@ -81,7 +85,7 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
             logger.warning("[quota] Service catalog is empty for this token")
             return None
 
-        # Compute (Nova) — mandatory
+        # Compute (Nova) mandatory
         compute_url = _get_catalog_endpoint(catalog, "compute", region)
         if not compute_url:
             logger.warning(f"[quota] No 'compute' endpoint found for region {region}")
@@ -96,13 +100,14 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
         limits_resp.raise_for_status()
         ab = limits_resp.json()["limits"]["absolute"]
 
+        # NOTE: add here if more info are needed
         quota = {
             "instances_available": ab["maxTotalInstances"] - ab["totalInstancesUsed"],
             "cores_available":     ab["maxTotalCores"]     - ab["totalCoresUsed"],
             "ram_mb_available":    ab["maxTotalRAMSize"]   - ab["totalRAMUsed"],
         }
 
-        # Security groups (Neutron) — optional, only checked if the cloud exposes it
+        # Security groups (Neutron)
         try:
             network_url = _get_catalog_endpoint(catalog, "network", region)
             if network_url and project_id:
@@ -128,9 +133,7 @@ def _get_openstack_quota(os_auth_url: str, os_token: str, region: str) -> Option
         return None
 
 
-def _flavor_requirements(
-    flavor_name: str, os_auth_url: str, os_token: str, region: str
-) -> Optional[dict]:
+def _flavor_requirements(flavor_name: str, os_auth_url: str, os_token: str, region: str) -> Optional[dict]:
     """
     Look up the flavor RAM and vCPU requirements via direct REST call to Nova.
     Returns dict with ram_mb and cores, or None on failure.
@@ -180,6 +183,7 @@ def check_quota(job) -> tuple:
     provider = job.selected_provider.lower()
 
     if provider != "openstack":
+        # TODO
         # AWS quota check not implemented yet — always allow
         return True, ""
 
@@ -193,16 +197,16 @@ def check_quota(job) -> tuple:
                 job.auth.aai_token, os_data.os_auth_url, os_data.os_project_id
             ) or ""
         except Exception as exc:
-            logger.warning(f"[quota] AAI→Keystone exchange failed: {exc}")
+            logger.warning(f"[quota] AAI -> Keystone exchange failed: {exc}")
 
     if not os_token:
-        logger.warning("[quota] No Keystone token — skipping quota check")
+        logger.warning("[quota] No Keystone token... skipping quota check")
         return True, ""
 
     quota = _get_openstack_quota(os_data.os_auth_url, os_token, os_data.region_name)
 
     if quota is None:
-        logger.warning("[quota] Could not read quota — skipping")
+        logger.warning("[quota] Could not read quota... skipping")
         return True, ""
 
     # Compute — mandatory
@@ -232,7 +236,7 @@ def check_quota(job) -> tuple:
         return False, "No security groups available (quota exhausted)."
 
     logger.info(
-        f"[quota] OK — instances: {quota['instances_available']}, "
+        f"[quota] OK... instances: {quota['instances_available']}, "
         f"cores: {quota['cores_available']}, "
         f"ram: {quota['ram_mb_available']} MB"
     )

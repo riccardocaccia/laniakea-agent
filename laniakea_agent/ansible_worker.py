@@ -1,3 +1,10 @@
+"""
+The physical executor of the software configuration (Ansible) on the 
+user's virtual machine. It is called by the ansible_agent.py module.
+
+"injects" the necessary files into the remote VM via SSH/SCP, 
+installs Ansible and makes it execute the playbook locally on itself
+"""
 import os
 import subprocess
 import shutil
@@ -6,7 +13,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# NOTE: move from here, not interesting... also update from rcaccia to laniakea
+# NOTE: move from here, not interesting... also update from rcaccia to laniakea once in prod.
+# Global variable to templates and configurations
 GROUP_VARS_URL = "https://raw.githubusercontent.com/riccardocaccia/laniakea-nebula/clean-main/terraform/ansible/group_vars/galaxy.yml"
 NGINX_TEMPLATE_URL = "https://raw.githubusercontent.com/riccardocaccia/laniakea-nebula/clean-main/terraform/ansible/templates/nginx/galaxy.j2"
 ANSIBLE_VENV = "/tmp/ansible-venv"
@@ -23,6 +31,14 @@ class AnsibleWorker:
         self.nginx_template_path = os.path.join(self.base_dir, "templates", "nginx", "galaxy.j2")
 
     def prepare_environment(self):
+        """
+        The agent creates an isolated temporary folder on its disk based on the deployment UUID
+        It uses the requests library to download four essential files from the internet:
+             The main playbook (deploy.yml).
+             The additional roles and requirements (requirements.yml).
+             The global variables (all.yml).
+             The Nginx template (galaxy.j2).
+        """
         try:
             os.makedirs(self.base_dir, exist_ok=True)
             os.makedirs(os.path.join(self.base_dir, "group_vars"), exist_ok=True)
@@ -57,6 +73,8 @@ class AnsibleWorker:
             f"-o UserKnownHostsFile=/dev/null "
         )
 
+        # perform the proxy jump drom the bastion 
+        #NOTE: rocky user here is used
         if bastion_ip and bastion_ip != "0.0.0.0":
             proxy = (
                 f"-o ProxyCommand='ssh -i {ssh_key_path} "
@@ -96,13 +114,14 @@ class AnsibleWorker:
                 f"exit ${{PIPESTATUS[0]}}'"
             ),
         ]
-
+ 
+        # NOTE: can be removed
         # debug helper
         for i, step in enumerate(steps):
             logger.info(f"[{self.uuid}] Step {i+1}/{len(steps)}: {step[:80]}...")
             res = subprocess.run(step, shell=True)
             if res.returncode != 0:
-                logger.error(f"[{self.uuid}] Step {i+1} fallito.")
+                logger.error(f"[{self.uuid}] Step {i+1} failed.")
                 return False
 
         return True
@@ -113,4 +132,4 @@ class AnsibleWorker:
         """
         if os.path.exists(self.base_dir):
             shutil.rmtree(self.base_dir)
-            logger.info(f"[{self.uuid}] Pulizia cartella temporanea completata.")
+            logger.info(f"[{self.uuid}] Cleaning of the tmp dir completed.")

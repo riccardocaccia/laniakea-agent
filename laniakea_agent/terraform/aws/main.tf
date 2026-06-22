@@ -16,18 +16,18 @@ provider "aws" {
 
 # --- RESOURCES ---
 
-# 1. Caricamento Chiave SSH
+# SSH key
 resource "aws_key_pair" "deployer_key" {
   key_name   = "rcaccia-key-${var.deployment_uuid}"
   public_key = var.ssh_public_key
 }
 
-# 2. Security Group (Firewall)
+# Security Group (Firewall)
 resource "aws_security_group" "main_sg" {
   name        = "securgroup-${var.deployment_uuid}"
   description = "Security group for Galaxy deployment"
 
-  # SSH dal Bastion (Porta 22)
+  # SSH from Bastion (Port 22)
   ingress {
     from_port   = 22
     to_port     = 22
@@ -35,7 +35,7 @@ resource "aws_security_group" "main_sg" {
     cidr_blocks = ["${var.bastion_ip}"]
   }
 
-  # Regole dinamiche dal JSON
+  # dynamic rule from json 
   dynamic "ingress" {
     for_each = var.open_ports
     content {
@@ -46,7 +46,7 @@ resource "aws_security_group" "main_sg" {
     }
   }
 
-  # Traffico in uscita (permettiamo tutto)
+  # outgoing connection (allowing everything)
   egress {
     from_port   = 0
     to_port     = 0
@@ -55,7 +55,7 @@ resource "aws_security_group" "main_sg" {
   }
 }
 
-# 3. Istanza EC2 (La VM)
+# EC2 instance
 resource "aws_instance" "galaxy_vm" {
   ami           = var.image_name  # Qui passeremo l'AMI ID di Rocky 9
   instance_type = var.instance_type

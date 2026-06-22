@@ -45,7 +45,7 @@ resource "openstack_compute_keypair_v2" "vm_key" {
 # Security Group
 resource "openstack_networking_secgroup_v2" "ssh_internal" {
   name        = "ssh-internal-${var.deployment_uuid}"
-  description = "Accesso SSH limitato all'IP del Bastion"
+  description = "SSH access limited to the IP of the Bastion"
 }
 
 resource "openstack_networking_secgroup_rule_v2" "ssh_from_bastion" {
@@ -61,7 +61,7 @@ resource "openstack_networking_secgroup_rule_v2" "ssh_from_bastion" {
 # Security Group
 resource "openstack_networking_secgroup_v2" "dynamic_sg" {
   name        = "sg-dynamic-${var.deployment_uuid}"
-  description = "Porte aperte dinamicamente dall'orchestratore"
+  description = "Port opened dynamically from orchestrator"
 }
 
 resource "openstack_networking_secgroup_rule_v2" "rules" {
@@ -100,5 +100,5 @@ resource "openstack_compute_instance_v2" "galaxy_vm" {
 output "vm_ip" {
   # Instance IP 
   value       = openstack_compute_instance_v2.galaxy_vm.access_ip_v4
-  description = "Indirizzo IP della VM creata"
+  description = "IP address of the created VM"
 }

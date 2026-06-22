@@ -22,6 +22,9 @@ import sys
 
 
 def main():
+    """
+    Define whcich parameters the command accepts.
+    """
     parser = argparse.ArgumentParser(
         prog="laniakea-agent",
         description="Laniakea deployment agent which consumes jobs from Redis queues.",
@@ -32,18 +35,18 @@ def main():
         dest="queues",
         default=None,
         metavar="NAME",
-        help="Queue name to listen on (e.g. openstack, aws). Repeat for multiple queues.",
+        help="Queue name to listen on (e.g. openstack, aws, ...). Repeat for multiple queues.",
     )
     parser.add_argument(
         "--env", "-e",
         default=".env",
         metavar="FILE",
-        help="Path to .env file (default: .env in current directory).",
+        help="Path to .env file (default: current directory).",
     )
     parser.add_argument(
         "--version", "-v",
         action="store_true",
-        help="Print version and exit.",
+        help="Print version",
     )
     args = parser.parse_args()
  
@@ -53,6 +56,7 @@ def main():
         sys.exit(0)
  
     # load .env
+    # if .env not present searches for enviroment variables
     env_path = os.path.abspath(args.env)
     if os.path.exists(env_path):
         from dotenv import load_dotenv
@@ -69,6 +73,7 @@ def main():
         print("         set them in .env or export them before running laniakea-agent")
         sys.exit(1)
  
+    # NOTE: da rimuovere il valore di default?
     # default queue
     queue_names = args.queues or ["openstack"]
  
@@ -90,6 +95,7 @@ def main():
     print(f"[agent] api:   {os.getenv('LANIAKEA_API_URL')}")
     print(f"[agent] id:    {os.getenv('AGENT_ID', 'laniakea-agent')}")
  
+    #NOTE: is it okay everyy 30 sec.?
     # start heartbeat loop in background thread
     import threading
     from laniakea_agent.quota_check import send_heartbeat
@@ -99,6 +105,9 @@ def main():
     provider    = os.getenv("AGENT_PROVIDER", "openstack")
  
     def _heartbeat_loop():
+        """
+        The agent must send a life signal every 30 seconds to the Laniakea API.
+        """
         import time
         agent_id = os.getenv("AGENT_ID", "laniakea-agent")
         while True:

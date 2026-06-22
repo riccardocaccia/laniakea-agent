@@ -6,10 +6,11 @@ import json
 from redis import Redis
 from rq import Queue
 
+# REDIS host
 REDIS_HOST     = os.getenv("REDIS_HOST", "")
-REDIS_PORT     = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PORT     = int(os.getenv("REDIS_PORT", "1908"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-RETRY_COUNT_FIELD = "_quota_retry_count"
+RETRY_COUNT_FIELD = "_quota_retry_count"   # possible retry for a job
 
 def requeue_job(job, retry_count: int) -> None:
     """
@@ -19,7 +20,7 @@ def requeue_job(job, retry_count: int) -> None:
         host=REDIS_HOST,
         port=REDIS_PORT,
         password=REDIS_PASSWORD,
-        decode_responses=False,
+        decode_responses=False,    # I don't care, we work with RQ and binary file
     )
     provider = job.selected_provider.lower()
     q = Queue(provider, connection=r)
@@ -30,5 +31,5 @@ def requeue_job(job, retry_count: int) -> None:
     q.enqueue(
         "laniakea_agent.worker_wrapper.run_from_dict",
         job_dict,
-        job_timeout="10h",
+        job_timeout="10h",   # gives 10h to complete the job before killing it
     )

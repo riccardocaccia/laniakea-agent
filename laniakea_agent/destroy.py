@@ -5,7 +5,7 @@ Removes ALL resources created by Terraform:
   - Security groups
   - Floating IP (if any)
 
-Auth logic for OpenStack (same as terraform_agent):
+Auth logic for OpenStack (same as terraform_agent.py):
   - If job.auth.aai_token is present exchange it for a Keystone token
   - Otherwise use app credentials from Vault
 """
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _PKG_TERRAFORM = os.path.join(os.path.dirname(_pkg.__file__), "terraform")
 
 PROVIDER_TERRAFORM_MAP: dict = {
-    "openstack":       os.path.join(_PKG_TERRAFORM, "openstack_recas"),
+    "openstack":       os.path.join(_PKG_TERRAFORM, "openstack_recas"), # default
     "openstack_recas": os.path.join(_PKG_TERRAFORM, "openstack_recas"),
     "openstack_garr":  os.path.join(_PKG_TERRAFORM, "openstack_garr"),
     "aws":             os.path.join(_PKG_TERRAFORM, "aws"),
@@ -32,6 +32,10 @@ PROVIDER_TERRAFORM_MAP: dict = {
 
 
 def _resolve_tf_dir(provider: str, template_path: str) -> str:
+    """
+    The module maps the supported providers to the respective folders of the 
+    package where the configuration files are located.
+    """
     tf_dir = PROVIDER_TERRAFORM_MAP.get(template_path) or PROVIDER_TERRAFORM_MAP.get(provider)
     if not tf_dir or not os.path.isdir(tf_dir):
         raise Exception(
@@ -43,6 +47,19 @@ def _resolve_tf_dir(provider: str, template_path: str) -> str:
 
 
 def run_destroy(job):
+    """
+    Orchestrates the complete teardown and destruction of cloud resources
+    associated with a specific deployment using a Terraform container.
+
+    Workflow:
+      1. Resolves the local path to the required Terraform configurations based on the job's provider and template.
+      2. Contacts Vault to fetch the user's cloud credentials 
+      3. Performs an OpenStack Keystone token exchange if an OIDC AAI token is available, falls back to app credentials otherwise.
+      4. Compiles all parameters into OS-level environment variables (prefixed with TF_VAR_).
+      5. Mounts the configuration folder into an official hashicorp/terraform:1.5 Docker container.
+      6. Executes terraform init and terraform destroy -auto-approve non-interactively.
+      7. Automatically removes the Docker container upon completion
+    """
     uuid     = job.deployment_uuid
     provider = job.selected_provider.lower()
     user_sub = job.get_sub()
@@ -69,7 +86,8 @@ def run_destroy(job):
         secrets = get_provider_credentials(user_sub, provider)
 
         ssh_key = secrets.get("ssh_key", "dummy")
-
+        
+        # common variables
         tf_vars = {
             "TF_VAR_deployment_uuid": str(uuid),
             "TF_VAR_ssh_public_key":  str(ssh_key).strip(),
@@ -78,6 +96,7 @@ def run_destroy(job):
             "TF_VAR_open_ports":      json.dumps([]),
         }
 
+        # OpenStack case
         if provider == 'openstack':
             os_data         = job.cloud_providers.openstack
             os_token        = ""
@@ -85,23 +104,23 @@ def run_destroy(job):
             app_cred_secret = ""
 
             if job.auth.aai_token and job.auth.aai_token.strip():
-                logger.info(f"[{uuid}] AAI token found — exchanging for Keystone token (destroy)...")
+                logger.info(f"[{uuid}] AAI token found... exchanging for Keystone token (destroy)...")
                 os_token = get_keystone_token(
                     job.auth.aai_token,
                     os_data.os_auth_url,
                     os_data.os_project_id,
                 )
                 if not os_token:
-                    logger.warning(f"[{uuid}] AAI → Keystone exchange failed, trying app credentials...")
+                    logger.warning(f"[{uuid}] AAI: Keystone exchange failed, trying app credentials...")
                     app_cred_id     = secrets.get("app_credential_id", "")
                     app_cred_secret = secrets.get("app_credential_secret", "")
             else:
-                logger.info(f"[{uuid}] No AAI token — using app credentials from Vault (destroy)...")
+                logger.info(f"[{uuid}] No AAI token... using app credentials from Vault (destroy)...")
                 app_cred_id     = secrets.get("app_credential_id", "")
                 app_cred_secret = secrets.get("app_credential_secret", "")
                 if not app_cred_id or not app_cred_secret:
                     logger.error(
-                        f"[{uuid}] No AAI token and no app credentials — destroy may fail."
+                        f"[{uuid}] No AAI token and no app credentials destroy failed."
                     )
 
             proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
@@ -123,6 +142,7 @@ def run_destroy(job):
                 "TF_VAR_bastion_ip":           proxy_host,
             })
 
+        # AWS case
         elif provider == 'aws':
             aws_data = job.cloud_providers.aws
             tf_vars.update({
@@ -134,6 +154,7 @@ def run_destroy(job):
                 "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "0.0.0.0",
             })
 
+        # Docker container
         client.containers.run(
             image="hashicorp/terraform:1.5",
             entrypoint="/bin/sh",
@@ -141,7 +162,7 @@ def run_destroy(job):
             volumes={tf_dir: {'bind': '/src', 'mode': 'rw'}},
             working_dir="/src",
             environment=tf_vars,
-            remove=True,
+            remove=True,             # remove when finished
         )
         logger.info(f"[{uuid}] Resources destroyed successfully on {provider}.")
 

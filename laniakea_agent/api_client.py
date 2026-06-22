@@ -1,11 +1,11 @@
 """
-Calls the Laniakea Queue API to update deployment status.
+Calls the Laniakea Queue API to update deployment status and to send logs.
 Auth: JWT signed with AGENT_MASTER_PASSWORD (HMAC-SHA256).
       No certificates needed just the shared master password.
 
 pool password model:
   - one master password governs all agents
-  - to revoke ALL agents: change the password on API + all agents and restart
+  - to revoke ALL agents: change the password on API and restart
 """
 
 import jwt
@@ -19,6 +19,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Base URL of the Laniakea queue API (HTTPS default port)
+# FIXME: default vaules to be mantained? useless? 
 API_BASE_URL = os.getenv("LANIAKEA_API_URL", "https://.......:8443")
 AGENT_MASTER_PASSWORD = os.getenv("AGENT_MASTER_PASSWORD", "")
 AGENT_ID = os.getenv("AGENT_ID", "laniakea-agent")
@@ -29,7 +30,6 @@ AGENT_CA_CERT = os.getenv("AGENT_CA_CERT", "certs/ca.crt")
 # token lifespan
 TOKEN_TTL_SECONDS = 300 # short lived token
 
-# Token generation
 def _mint_token() -> str:
     """
     Generate a short-lived JWT signed with the master password.
@@ -41,7 +41,7 @@ def _mint_token() -> str:
       jti:  unique token ID
     """
     if not AGENT_MASTER_PASSWORD:
-        raise RuntimeError("AGENT_MASTER_PASSWORD is not set.")
+        raise RuntimeError("AGENT_MASTER_PASSWORD is not set. Set it to proceed")
 
     now = int(time.time())
     payload = {
@@ -53,11 +53,10 @@ def _mint_token() -> str:
     return jwt.encode(payload, AGENT_MASTER_PASSWORD, algorithm="HS256")
 
 
-# Internal helper
 def _make_client() -> httpx.Client:
     """
-    Build an httpx Client with:
-      - Authorization: Bearer <JWT>  for agent authentication
+    Build an httpx Client configuring:
+      - Authorization: Bearer <JWT> for agent authentication
       - TLS server verification via CA cert
     """
     token = _mint_token()
@@ -75,7 +74,6 @@ def _make_client() -> httpx.Client:
 
 
 # Public interface called by terraform_agent.py
-
 def update_deployment_status(
     deployment_uuid: str, new_status: str, status_reason: Optional[str] = None, outputs: Optional[str] = None,)-> bool:
     # NOTE: add email, not every time only the first
@@ -92,13 +90,12 @@ def update_deployment_status(
     status_reason : str, optional
         Human-readable reason (used on FAILED states).
     outputs : str, optional
-        JSON string with deployment outputs (e.g. vm_ip).
+        JSON string with deployment outputs 
 
     Returns
     -------
     bool
         True on success, False if the API rejected or was unreachable.
-        The caller decides whether to raise or continue.
     """
     payload = {"status": new_status.upper()}
     if status_reason:

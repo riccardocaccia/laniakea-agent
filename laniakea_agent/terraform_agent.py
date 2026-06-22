@@ -30,7 +30,6 @@ from laniakea_agent.destroy import run_destroy
 from laniakea_agent.notifier import send_success, send_failure
 
 # Logging
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -43,26 +42,24 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # Terraform provider map 
 # Maps provider/template names to the terraform config directory inside the
-# installed package. Adding a new provider = add one line here.
-
+# installed package. 
+#NOTE: Adding a new provider = add one line here.
 import laniakea_agent as _pkg
 _PKG_TERRAFORM = os.path.join(os.path.dirname(_pkg.__file__), "terraform")
-
 PROVIDER_TERRAFORM_MAP: dict = {
     # openstack aliases
-    "openstack":        os.path.join(_PKG_TERRAFORM, "openstack_recas"),
+    "openstack":        os.path.join(_PKG_TERRAFORM, "openstack_recas"), # NOTE: recas treated as default
     "openstack_recas":  os.path.join(_PKG_TERRAFORM, "openstack_recas"),
     "openstack_garr":   os.path.join(_PKG_TERRAFORM, "openstack_garr"),
     # aws
     "aws":              os.path.join(_PKG_TERRAFORM, "aws"),
+    # ...
 }
-
-# API push log handler 
 
 class _ApiPushHandler(logging.Handler):
     """
     Silently forwards every log record to the API via push_log_line().
-    Failures are swallowed — a broken API connection must never crash the agent.
+    Failures are swallowed.
     """
     def __init__(self, deployment_uuid: str):
         super().__init__()
@@ -105,7 +102,6 @@ def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
 
 
 # Pydantic models 
-
 class OpenPort(BaseModel):
     port:     int
     protocol: str
@@ -114,12 +110,12 @@ class OpenPort(BaseModel):
 class AuthConfig(BaseModel):
     aai_token: Optional[str] = None
     sub:       str
-    group:     str = "default"
+    group:     str = "default"         # NOTE: .....
 
 class OpenStackInputs(BaseModel):
     flavor:       str
     image:        str
-    network_type: str = "private"
+    network_type: str = "private"      # NOTE: .....
     open_ports:   list[OpenPort] = []
 
 class AWSInputs(BaseModel):
@@ -141,9 +137,9 @@ class TemplateConfig(BaseModel):
 class OpenStackProvider(BaseModel):
     os_auth_url:                 str
     os_project_id:               str
-    region_name:                 str = "RegionOne"       # NOTE: these choice works only for recas (default prov.) is ok? 
-    private_net_name:            str = "private_net"
-    public_net_name:             str = "public_net"
+    region_name:                 str = "RegionOne"       # NOTE: these choice works only for recas (default prov.) 
+    private_net_name:            str = "private_net"     # NOTE: as before
+    public_net_name:             str = "public_net"      # NOTE: ...
     endpoint_overrides_network:  str
     endpoint_overrides_volumev3: str
     endpoint_overrides_image:    str
@@ -185,13 +181,13 @@ def _resolve_tf_dir(provider: str, template_path: str) -> str:
     Resolve the terraform config directory from the installed package.
 
     Priority:
-      1. template.path exact match in PROVIDER_TERRAFORM_MAP (e.g. "openstack_garr")
-      2. provider name match (e.g. "openstack" → openstack_recas default)
+      1. template.path exact match in PROVIDER_TERRAFORM_MAP
+      2. provider name match 
       3. Raise if nothing found.
     """
-    # try the explicit template path first (e.g. "openstack_garr")
+    # try the explicit template path first
     tf_dir = PROVIDER_TERRAFORM_MAP.get(template_path)
-    # fall back to provider name (e.g. "openstack")
+    # fall back to provider name
     if not tf_dir:
         tf_dir = PROVIDER_TERRAFORM_MAP.get(provider)
     if not tf_dir or not os.path.isdir(tf_dir):
@@ -208,8 +204,8 @@ def run_orchestration(job: Job):
     End-to-end lifecycle of a cloud deployment.
 
     State transitions:
-      QUEUED → CREATE_IN_PROGRESS → CREATE_COMPLETE
-                                  → CREATE_FAILED
+      QUEUED -> CREATE_IN_PROGRESS -> CREATE_COMPLETE
+                                   -> CREATE_FAILED
     """
     uuid     = job.deployment_uuid
     provider = job.selected_provider.lower()

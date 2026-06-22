@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "laniakea-api-agent"
-version = "0.1.9"
+version = "0.1.10"
 description = "Laniakea deployment agent orchestrates cloud deployments via Terraform and Ansible"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 
 authors = [
-  { name = "rcaccia" }
+  { name = "Riccardo Caccia" }
 ]
 
 keywords = ["cloud", "deployment", "openstack", "aws", "terraform", "ansible", "redis"]

@@ -1,3 +1,5 @@
+# FIXME: update
+
 from keystoneauth1 import loading
 from keystoneauth1 import session
 import logging
@@ -5,8 +7,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 def get_openstack_admin_creds():
-    ''' access to retrieve OpenStack credentials from Vault '''
-    # CHANGE THE VAULT PATH ONCE VAULT BUILD FINAL COMPLETED
+    '''
+    access to retrieve OpenStack credentials from Vault 
+    '''
+    # NOTE: CHANGE THE VAULT PATH ONCE VAULT BUILD FINAL COMPLETED
     return get_secrets("SECRET/infrastructure/openstack/admin")
 
 def get_keystone_token(aai_token, auth_url, project_id):
@@ -15,9 +19,8 @@ def get_keystone_token(aai_token, auth_url, project_id):
         
         auth = loader.load_from_options(
             auth_url=auth_url,
-            ### TODO: env variable? or input? ###
+            #NOTE: env variable or input?
             identity_provider='recas-bari', 
-            #####################################
             protocol='openid',
             access_token=aai_token,
             project_id=project_id
