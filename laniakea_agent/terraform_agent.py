@@ -284,7 +284,7 @@ def run_orchestration(job: Job):
             os_token        = ""
             app_cred_id     = ""
             app_cred_secret = ""
-
+ 
             if job.auth.aai_token and job.auth.aai_token.strip():
                 dlog.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
                 os_token = get_keystone_token(
@@ -303,9 +303,49 @@ def run_orchestration(job: Job):
                         "No AAI token in job and no app credentials in Vault. "
                         "Cannot authenticate to OpenStack."
                     )
-
+ 
+            # --- Network discovery ---
+            from laniakea_agent.network_discovery import discover_networks
+ 
+            neutron_url = os_data.endpoint_overrides_network or ""
+            if not neutron_url:
+                # fallback: try to get it from the Keystone catalog
+                from laniakea_agent.quota_check import _fetch_token_info, _get_catalog_endpoint
+                try:
+                    token_info  = _fetch_token_info(os_data.os_auth_url, os_token)
+                    catalog     = token_info.get("catalog", [])
+                    neutron_url = _get_catalog_endpoint(catalog, "network", os_data.region_name) or ""
+                except Exception as exc:
+                    dlog.warning(f"[{uuid}] Could not resolve Neutron URL from catalog: {exc}")
+ 
+            if neutron_url:
+                try:
+                    net_info = discover_networks(
+                        neutron_url=neutron_url,
+                        os_token=os_token,
+                        network_type=os_data.inputs.network_type,
+                    )
+                    public_net_name  = net_info["public_net_name"]
+                    private_net_name = net_info["private_net_name"]
+                    use_floating_ip  = net_info["use_floating_ip"]
+                    dlog.info(
+                        f"[{uuid}] Network discovery: topology={net_info['topology']!r} "
+                        f"public={public_net_name!r} private={private_net_name!r} "
+                        f"floating_ip={use_floating_ip}"
+                    )
+                except Exception as exc:
+                    dlog.warning(f"[{uuid}] Network discovery failed: {exc} — using job defaults")
+                    public_net_name  = os_data.public_net_name
+                    private_net_name = os_data.private_net_name
+                    use_floating_ip  = False
+            else:
+                dlog.warning(f"[{uuid}] No Neutron URL available — using job defaults")
+                public_net_name  = os_data.public_net_name
+                private_net_name = os_data.private_net_name
+                use_floating_ip  = False
+ 
             proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
-
+ 
             tf_vars.update({
                 "TF_VAR_os_auth_url":          os_data.os_auth_url,
                 "TF_VAR_os_tenant_id":         os_data.os_project_id,
@@ -313,8 +353,9 @@ def run_orchestration(job: Job):
                 "TF_VAR_os_app_cred_id":       app_cred_id,
                 "TF_VAR_os_app_cred_secret":   app_cred_secret,
                 "TF_VAR_os_region":            os_data.region_name,
-                "TF_VAR_private_network_name": os_data.private_net_name,
-                "TF_VAR_public_network_name":  os_data.public_net_name,
+                "TF_VAR_private_network_name": private_net_name,
+                "TF_VAR_public_network_name":  public_net_name,
+                "TF_VAR_use_floating_ip":      "true" if use_floating_ip else "false",
                 "TF_VAR_endpoint_network":     os_data.endpoint_overrides_network,
                 "TF_VAR_endpoint_volumev3":    os_data.endpoint_overrides_volumev3,
                 "TF_VAR_endpoint_image":       os_data.endpoint_overrides_image,
@@ -324,6 +365,7 @@ def run_orchestration(job: Job):
                 "TF_VAR_bastion_ip":           proxy_host,
                 "TF_VAR_open_ports":           json.dumps([p.model_dump() for p in os_data.inputs.open_ports]),
             })
+
 
         elif provider == 'aws':
             aws_data   = job.cloud_providers.aws

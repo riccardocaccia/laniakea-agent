@@ -34,34 +34,45 @@ data "openstack_networking_network_v2" "public_net" {
   name = var.public_network_name
 }
 
-# --- RESOURCES ---
+# --- SSH KEY ---
 
-# SSH key
 resource "openstack_compute_keypair_v2" "vm_key" {
-  name       = "rcaccia_key_${var.deployment_uuid}"
+  name       = "laniakea_key_${var.deployment_uuid}"
   public_key = var.ssh_public_key
 }
 
-# Security Group
-resource "openstack_networking_secgroup_v2" "ssh_internal" {
-  name        = "ssh-internal-${var.deployment_uuid}"
-  description = "SSH access limited to the IP of the Bastion"
+# --- SECURITY GROUPS ---
+
+resource "openstack_networking_secgroup_v2" "ssh_sg" {
+  name        = "ssh-sg-${var.deployment_uuid}"
+  description = "SSH access"
 }
 
-resource "openstack_networking_secgroup_rule_v2" "ssh_from_bastion" {
+resource "openstack_networking_secgroup_rule_v2" "ssh_rule_bastion" {
+  count             = var.network_type == "private" ? 1 : 0
   direction         = "ingress"
   ethertype         = "IPv4"
   protocol          = "tcp"
   port_range_min    = 22
   port_range_max    = 22
   remote_ip_prefix  = "${var.bastion_ip}/32"
-  security_group_id = openstack_networking_secgroup_v2.ssh_internal.id
+  security_group_id = openstack_networking_secgroup_v2.ssh_sg.id
 }
 
-# Security Group
+resource "openstack_networking_secgroup_rule_v2" "ssh_rule_open" {
+  count             = var.network_type == "public" ? 1 : 0
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 22
+  port_range_max    = 22
+  remote_ip_prefix  = "0.0.0.0/0"
+  security_group_id = openstack_networking_secgroup_v2.ssh_sg.id
+}
+
 resource "openstack_networking_secgroup_v2" "dynamic_sg" {
   name        = "sg-dynamic-${var.deployment_uuid}"
-  description = "Port opened dynamically from orchestrator"
+  description = "Ports opened dynamically from orchestrator"
 }
 
 resource "openstack_networking_secgroup_rule_v2" "rules" {
@@ -75,30 +86,52 @@ resource "openstack_networking_secgroup_rule_v2" "rules" {
   security_group_id = openstack_networking_secgroup_v2.dynamic_sg.id
 }
 
-# Virtual Machine
+# --- VM ---
+
 resource "openstack_compute_instance_v2" "galaxy_vm" {
-  name            = "galaxy-${var.deployment_uuid}"
-  image_name      = var.image_name
-  flavor_name     = var.flavor_name
-  key_pair        = openstack_compute_keypair_v2.vm_key.name
+  name        = "galaxy-${var.deployment_uuid}"
+  image_name  = var.image_name
+  flavor_name = var.flavor_name
+  key_pair    = openstack_compute_keypair_v2.vm_key.name
 
   security_groups = [
     "default",
-    openstack_networking_secgroup_v2.ssh_internal.name,
-    openstack_networking_secgroup_v2.dynamic_sg.name
+    openstack_networking_secgroup_v2.ssh_sg.name,
+    openstack_networking_secgroup_v2.dynamic_sg.name,
   ]
 
-  # dynamic network selection
-  # if network_type == 'public', uses public_net. Otherwise private_net.
+  user_data = <<-USERDATA
+users:
+  - default
+  - name: rocky
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    groups: wheel
+    shell: /bin/bash
+append_to_groups: true
+USERDATA
+
   network {
     uuid = var.network_type == "public" ? data.openstack_networking_network_v2.public_net.id : data.openstack_networking_network_v2.private_net.id
   }
 }
 
+# --- FLOATING IP (only when topology=floating_ip AND network_type=public) ---
+
+resource "openstack_networking_floatingip_v2" "fip" {
+  count = var.use_floating_ip ? 1 : 0
+  pool  = var.public_network_name
+}
+
+resource "openstack_compute_floatingip_associate_v2" "fip_assoc" {
+  count       = var.use_floating_ip ? 1 : 0
+  floating_ip = openstack_networking_floatingip_v2.fip[0].address
+  instance_id = openstack_compute_instance_v2.galaxy_vm.id
+}
+
 # --- OUTPUT ---
 
 output "vm_ip" {
-  # Instance IP 
-  value       = openstack_compute_instance_v2.galaxy_vm.access_ip_v4
-  description = "IP address of the created VM"
+  value       = var.use_floating_ip ? openstack_networking_floatingip_v2.fip[0].address : openstack_compute_instance_v2.galaxy_vm.access_ip_v4
+  description = "IP address to reach the VM"
 }
+
