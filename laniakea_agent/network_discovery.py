@@ -54,12 +54,14 @@ def discover_networks(
     RuntimeError if required networks cannot be discovered.
     """
     neutron_url = neutron_url.rstrip("/")
+    # Some clouds (e.g. GARR) return the Neutron endpoint without /v2.0
+    if not neutron_url.endswith("/v2.0"):
+        neutron_url = neutron_url + "/v2.0"
     headers     = {"X-Auth-Token": os_token}
 
-    def _get_networks(params: dict) -> list:
+    def _get_all_networks() -> list:
         resp = requests.get(
             f"{neutron_url}/networks",
-            params=params,
             headers=headers,
             verify=False,
             timeout=10,
@@ -67,8 +69,12 @@ def discover_networks(
         resp.raise_for_status()
         return resp.json().get("networks", [])
 
-    # Step 1 — check for external networks (floating IP topology)
-    external_nets = _get_networks({"router:external": "True"})
+    # Step 1 — fetch all networks and filter client-side
+    # Some Neutron versions (e.g. GARR) reject router:external as a query
+    # param but return the field correctly in each network object
+    all_nets      = _get_all_networks()
+    external_nets = [n for n in all_nets if n.get("router:external") is True]
+    project_nets  = [n for n in all_nets if not n.get("router:external")]
 
     if external_nets:
         # GARR-style: floating IP topology
@@ -79,10 +85,9 @@ def discover_networks(
         public_net_name = external_nets[0]["name"]
 
         # private net = first non-external, non-shared network of the project
-        project_nets = _get_networks({"router:external": "False", "shared": "False"})
+        project_nets = [n for n in all_nets if not n.get("router:external") and not n.get("shared")]
         if not project_nets:
-            # fallback: any non-external net
-            project_nets = _get_networks({"router:external": "False"})
+            project_nets = [n for n in all_nets if not n.get("router:external")]
         if not project_nets:
             raise RuntimeError(
                 "Network discovery: no private network found on this cloud. "
@@ -97,7 +102,6 @@ def discover_networks(
         topology        = "direct"
         use_floating_ip = False
 
-        all_nets     = _get_networks({})
         shared_nets  = [n for n in all_nets if n.get("shared") is True]
         private_nets = [n for n in all_nets if n.get("shared") is False]
 

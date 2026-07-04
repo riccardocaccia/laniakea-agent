@@ -6,8 +6,11 @@ State management:
   The agent has NO direct database access!
 
 Auth logic for OpenStack:
-  - If job.auth.aai_token is present exchange it for a Keystone token
-  - Otherwise use app credentials from Vault
+  1. If job.auth.aai_token is present, try to exchange it for a Keystone token
+     (works on ReCaS which has recas-bari as identity provider)
+  2. If that fails or no AAI token, fall back to app credentials from Vault
+     (works on GARR and any cloud with app credentials)
+  3. If neither works, raise and fail the deployment
 
 Notifications:
   - On success: sends email with VM IP
@@ -40,27 +43,18 @@ logger = logging.getLogger(__name__)
 LOG_DIR = os.getenv("DEPLOYMENT_LOG_DIR", "/var/log/laniakea-agent")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Terraform provider map 
-# Maps provider/template names to the terraform config directory inside the
-# installed package. 
-#NOTE: Adding a new provider = add one line here.
 import laniakea_agent as _pkg
 _PKG_TERRAFORM = os.path.join(os.path.dirname(_pkg.__file__), "terraform")
+
 PROVIDER_TERRAFORM_MAP: dict = {
-    # openstack aliases
-    "openstack":        os.path.join(_PKG_TERRAFORM, "openstack_recas"), # NOTE: recas treated as default
+    "openstack":        os.path.join(_PKG_TERRAFORM, "openstack_recas"),
     "openstack_recas":  os.path.join(_PKG_TERRAFORM, "openstack_recas"),
     "openstack_garr":   os.path.join(_PKG_TERRAFORM, "openstack_garr"),
-    # aws
     "aws":              os.path.join(_PKG_TERRAFORM, "aws"),
-    # ...
 }
 
+
 class _ApiPushHandler(logging.Handler):
-    """
-    Silently forwards every log record to the API via push_log_line().
-    Failures are swallowed.
-    """
     def __init__(self, deployment_uuid: str):
         super().__init__()
         self._uuid = deployment_uuid
@@ -73,10 +67,6 @@ class _ApiPushHandler(logging.Handler):
 
 
 def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
-    """
-    Return a logger bound to a single deployment.
-    Writes to: local file + API push + stdout.
-    """
     dep_logger = logging.getLogger(f"deployment.{deployment_uuid}")
     if dep_logger.handlers:
         return dep_logger
@@ -84,24 +74,21 @@ def _get_deployment_logger(deployment_uuid: str) -> logging.Logger:
     dep_logger.setLevel(logging.INFO)
     fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 
-    # 1. local file
     log_path = os.path.join(LOG_DIR, f"terraform_{deployment_uuid}.log")
     fh = logging.FileHandler(log_path)
     fh.setFormatter(fmt)
     dep_logger.addHandler(fh)
 
-    # 2. API push
     ph = _ApiPushHandler(deployment_uuid)
     ph.setFormatter(fmt)
     dep_logger.addHandler(ph)
 
-    # 3. propagate to root (stdout)
     dep_logger.propagate = True
-
     return dep_logger
 
 
-# Pydantic models 
+# Pydantic models
+
 class OpenPort(BaseModel):
     port:     int
     protocol: str
@@ -110,39 +97,39 @@ class OpenPort(BaseModel):
 class AuthConfig(BaseModel):
     aai_token: Optional[str] = None
     sub:       str
-    group:     str = "default"         # NOTE: .....
+    group:     str = "default"
 
 class OpenStackInputs(BaseModel):
     flavor:       str
     image:        str
-    network_type: str = "private"      # NOTE: .....
+    network_type: str = "private"
     open_ports:   list[OpenPort] = []
 
 class AWSInputs(BaseModel):
     instance_type: str
     image:         str
-    network_type:  str = "public"      # NOTE: see what is the best choice
+    network_type:  str = "public"
     open_ports:    list[OpenPort] = []
 
 class TemplateConfig(BaseModel):
-    """
-    template.path selects which terraform config to use.
-    Valid values: openstack, openstack_recas, openstack_garr, aws.
-    The path is resolved against the installed package — no local files needed.
-    """
     url:    str = ""
-    path:   str = "openstack_recas"   # default provider
+    path:   str = "openstack_recas"
     branch: str = "main"
+
+class OrchestratorConfig(BaseModel):
+    target_provider: str
+    desired_orchestrator: str
+    endpoint: str
 
 class OpenStackProvider(BaseModel):
     os_auth_url:                 str
     os_project_id:               str
-    region_name:                 str = "RegionOne"       # NOTE: these choice works only for recas (default prov.) 
-    private_net_name:            str = "private_net"     # NOTE: as before
-    public_net_name:             str = "public_net"      # NOTE: ...
-    endpoint_overrides_network:  str
-    endpoint_overrides_volumev3: str
-    endpoint_overrides_image:    str
+    region_name:                 str = "RegionOne"
+    private_net_name:            str = ""
+    public_net_name:             str = ""
+    endpoint_overrides_network:  str = ""
+    endpoint_overrides_volumev3: str = ""
+    endpoint_overrides_image:    str = ""
     private_network_proxy_host:  Optional[str] = None
     template:                    TemplateConfig = TemplateConfig()
     inputs:                      OpenStackInputs
@@ -160,6 +147,7 @@ class CloudProviders(BaseModel):
 class Job(BaseModel):
     deployment_uuid:   str
     auth:              AuthConfig
+    orchestrator:      Optional[OrchestratorConfig] = None
     selected_provider: str
     cloud_providers:   CloudProviders
     user_sub:          Optional[str] = None
@@ -174,20 +162,8 @@ class Job(BaseModel):
         return self.requested_by or self.auth.sub[:8]
 
 
-# Orchestration 
-
 def _resolve_tf_dir(provider: str, template_path: str) -> str:
-    """
-    Resolve the terraform config directory from the installed package.
-
-    Priority:
-      1. template.path exact match in PROVIDER_TERRAFORM_MAP
-      2. provider name match 
-      3. Raise if nothing found.
-    """
-    # try the explicit template path first
     tf_dir = PROVIDER_TERRAFORM_MAP.get(template_path)
-    # fall back to provider name
     if not tf_dir:
         tf_dir = PROVIDER_TERRAFORM_MAP.get(provider)
     if not tf_dir or not os.path.isdir(tf_dir):
@@ -198,6 +174,55 @@ def _resolve_tf_dir(provider: str, template_path: str) -> str:
         )
     return tf_dir
 
+
+def _get_os_auth(job, os_data, secrets, dlog) -> tuple:
+    """
+    Resolve OpenStack authentication credentials.
+    """
+    uuid            = job.deployment_uuid
+    os_token        = ""
+    app_cred_id     = ""
+    app_cred_secret = ""
+
+    # Estrazione del target_provider dal JSON
+    target_provider = ""
+    try:
+        if hasattr(job, 'orchestrator') and job.orchestrator:
+            if hasattr(job.orchestrator, 'target_provider'):
+                target_provider = str(job.orchestrator.target_provider).lower().strip()
+            elif isinstance(job.orchestrator, dict):
+                target_provider = str(job.orchestrator.get("target_provider", "")).lower().strip()
+    except Exception:
+        target_provider = ""
+
+    # STRADA RECAS: Scambio OIDC -> Keystone
+    if target_provider == "openstack_recas":
+        if job.auth.aai_token and job.auth.aai_token.strip():
+            dlog.info(f"[{uuid}] ReCaS target detected. Exchanging AAI token for Keystone token...")
+            os_token = get_keystone_token(
+                job.auth.aai_token,
+                os_data.os_auth_url,
+                os_data.os_project_id,
+            ) or ""
+            if os_token:
+                dlog.info(f"[{uuid}] Keystone token obtained via OIDC exchange.")
+            else:
+                dlog.warning(f"[{uuid}] OIDC→Keystone exchange failed — falling back to app credentials.")
+
+    # STRADA GARR (o fallback ReCaS se os_token è rimasto vuoto)
+    if not os_token:
+        app_cred_id     = secrets.get("app_credential_id", "")
+        app_cred_secret = secrets.get("app_credential_secret", "")
+        if app_cred_id and app_cred_secret:
+            dlog.info(f"[{uuid}] Using app credentials from Vault.")
+        else:
+            raise Exception(
+                "No Keystone token and no app credentials in Vault. "
+                "Cannot authenticate to OpenStack. "
+                "Either provide an AAI token or store app credentials via /profile/credentials."
+            )
+
+    return os_token, app_cred_id, app_cred_secret
 
 def run_orchestration(job: Job):
     """
@@ -214,7 +239,6 @@ def run_orchestration(job: Job):
     username = job.get_username()
     dlog     = _get_deployment_logger(uuid)
 
-    # resolve terraform config dir from the installed package
     try:
         if provider == 'openstack':
             template_path = job.cloud_providers.openstack.template.path
@@ -233,16 +257,13 @@ def run_orchestration(job: Job):
 
     dlog.info(f"[{uuid}] Provisioning started on {provider} for user {user_sub[:8]}...")
 
-    # auth check if API rejects the token abort before touching cloud resources
     ok = update_deployment_status(uuid, "CREATE_IN_PROGRESS")
     if not ok:
         raise PermissionError(
             f"[{uuid}] Unauthorized: AGENT_MASTER_PASSWORD mismatch between agent and API. "
-            f"No cloud resources were created. "
-            f"Fix the password on both sides and re-enqueue the deployment."
+            f"No cloud resources were created."
         )
 
-    # quota check before touching cloud resources
     from laniakea_agent.quota_check import check_quota, MAX_QUOTA_RETRIES, RETRY_COUNT_FIELD
 
     retry_count = job.__dict__.get(RETRY_COUNT_FIELD, 0)
@@ -254,11 +275,10 @@ def run_orchestration(job: Job):
 
         if retry_count >= MAX_QUOTA_RETRIES:
             update_deployment_status(uuid, "CREATE_FAILED",
-                status_reason=f"No agent with sufficient quota after {MAX_QUOTA_RETRIES} attempts: {quota_reason}")
+                status_reason=f"Quota exhausted after {MAX_QUOTA_RETRIES} attempts: {quota_reason}")
             send_failure(email, username, uuid, reason=f"Quota exhausted: {quota_reason}")
             return
 
-        # re-queue the job with incremented retry count
         from laniakea_agent.queue_utils import requeue_job
         requeue_job(job, retry_count)
         update_deployment_status(uuid, "QUEUED",
@@ -280,49 +300,51 @@ def run_orchestration(job: Job):
         }
 
         if provider == 'openstack':
-            os_data         = job.cloud_providers.openstack
-            os_token        = ""
-            app_cred_id     = ""
-            app_cred_secret = ""
- 
-            if job.auth.aai_token and job.auth.aai_token.strip():
-                dlog.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
-                os_token = get_keystone_token(
-                    job.auth.aai_token,
-                    os_data.os_auth_url,
-                    os_data.os_project_id,
-                )
-                if not os_token:
-                    raise Exception("Keystone token exchange failed.")
-            else:
-                dlog.info(f"[{uuid}] No AAI token: using app credentials from Vault...")
-                app_cred_id     = secrets.get("app_credential_id", "")
-                app_cred_secret = secrets.get("app_credential_secret", "")
-                if not app_cred_id or not app_cred_secret:
-                    raise Exception(
-                        "No AAI token in job and no app credentials in Vault. "
-                        "Cannot authenticate to OpenStack."
-                    )
- 
-            # --- Network discovery ---
-            from laniakea_agent.network_discovery import discover_networks
- 
-            neutron_url = os_data.endpoint_overrides_network or ""
-            if not neutron_url:
-                # fallback: try to get it from the Keystone catalog
-                from laniakea_agent.quota_check import _fetch_token_info, _get_catalog_endpoint
+            os_data = job.cloud_providers.openstack
+
+            # Resolve auth — OIDC first, app credentials as fallback
+            os_token, app_cred_id, app_cred_secret = _get_os_auth(
+                job, os_data, secrets, dlog
+            )
+
+            # Network discovery — needs a token for Neutron calls
+            # If we only have app credentials, get a token for discovery
+            discovery_token = os_token
+            if not discovery_token and app_cred_id:
                 try:
-                    token_info  = _fetch_token_info(os_data.os_auth_url, os_token)
+                    import requests as _req
+                    r = _req.post(
+                        f"{os_data.os_auth_url}/auth/tokens",
+                        json={"auth": {"identity": {
+                            "methods": ["application_credential"],
+                            "application_credential": {
+                                "id": app_cred_id, "secret": app_cred_secret
+                            }
+                        }}},
+                        verify=False, timeout=10,
+                    )
+                    if r.ok:
+                        discovery_token = r.headers.get("X-Subject-Token", "")
+                except Exception:
+                    pass
+
+            from laniakea_agent.network_discovery import discover_networks
+            from laniakea_agent.quota_check import _fetch_token_info, _get_catalog_endpoint
+
+            neutron_url = os_data.endpoint_overrides_network or ""
+            if not neutron_url and discovery_token:
+                try:
+                    token_info  = _fetch_token_info(os_data.os_auth_url, discovery_token)
                     catalog     = token_info.get("catalog", [])
                     neutron_url = _get_catalog_endpoint(catalog, "network", os_data.region_name) or ""
                 except Exception as exc:
                     dlog.warning(f"[{uuid}] Could not resolve Neutron URL from catalog: {exc}")
- 
-            if neutron_url:
+
+            if neutron_url and discovery_token:
                 try:
                     net_info = discover_networks(
                         neutron_url=neutron_url,
-                        os_token=os_token,
+                        os_token=discovery_token,
                         network_type=os_data.inputs.network_type,
                     )
                     public_net_name  = net_info["public_net_name"]
@@ -339,13 +361,13 @@ def run_orchestration(job: Job):
                     private_net_name = os_data.private_net_name
                     use_floating_ip  = False
             else:
-                dlog.warning(f"[{uuid}] No Neutron URL available — using job defaults")
+                dlog.warning(f"[{uuid}] No Neutron URL or token — using job defaults")
                 public_net_name  = os_data.public_net_name
                 private_net_name = os_data.private_net_name
                 use_floating_ip  = False
- 
+
             proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
- 
+
             tf_vars.update({
                 "TF_VAR_os_auth_url":          os_data.os_auth_url,
                 "TF_VAR_os_tenant_id":         os_data.os_project_id,
@@ -366,7 +388,6 @@ def run_orchestration(job: Job):
                 "TF_VAR_open_ports":           json.dumps([p.model_dump() for p in os_data.inputs.open_ports]),
             })
 
-
         elif provider == 'aws':
             aws_data   = job.cloud_providers.aws
             access_key = secrets.get("access_key")
@@ -385,7 +406,6 @@ def run_orchestration(job: Job):
                 "TF_VAR_open_ports":     json.dumps([p.model_dump() for p in aws_data.inputs.open_ports]),
             })
 
-        # Terraform apply
         dlog.info(f"[{uuid}] Running Terraform container for {provider} ({tf_dir})...")
         client.containers.run(
             image="hashicorp/terraform:1.5",
@@ -397,7 +417,6 @@ def run_orchestration(job: Job):
             remove=True,
         )
 
-        # retrieve VM IP
         dlog.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
         vm_ip_bytes = client.containers.run(
             image="hashicorp/terraform:1.5",
@@ -413,8 +432,6 @@ def run_orchestration(job: Job):
         time.sleep(30)
         dlog.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
 
-        # Ansible configuration
-        # resolve repo_url_template.yml from the installed package
         _repo_url_tpl = os.path.join(os.path.dirname(_pkg.__file__), "repo_url_template.yml")
         with open(_repo_url_tpl, "r") as yf:
             tpl = yaml.safe_load(yf)
@@ -431,7 +448,8 @@ def run_orchestration(job: Job):
                 uuid, "CREATE_FAILED",
                 status_reason="Configuration step (Ansible) failed. Resources destroyed.",
             )
-            send_failure(email, username, uuid, reason="Configuration step (Ansible) failed. Resources have been cleaned up.")
+            send_failure(email, username, uuid,
+                reason="Configuration step (Ansible) failed. Resources have been cleaned up.")
         else:
             update_deployment_status(
                 uuid, "CREATE_COMPLETE",
@@ -452,4 +470,3 @@ if __name__ == "__main__":
         raw_data = json.load(f)
     job = Job(**raw_data)
     run_orchestration(job)
-
