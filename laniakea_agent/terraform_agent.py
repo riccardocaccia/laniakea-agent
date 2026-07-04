@@ -116,11 +116,6 @@ class TemplateConfig(BaseModel):
     path:   str = "openstack_recas"
     branch: str = "main"
 
-class OrchestratorConfig(BaseModel):
-    target_provider: str
-    desired_orchestrator: str
-    endpoint: str
-
 class OpenStackProvider(BaseModel):
     os_auth_url:                 str
     os_project_id:               str
@@ -147,7 +142,6 @@ class CloudProviders(BaseModel):
 class Job(BaseModel):
     deployment_uuid:   str
     auth:              AuthConfig
-    orchestrator:      Optional[OrchestratorConfig] = None
     selected_provider: str
     cloud_providers:   CloudProviders
     user_sub:          Optional[str] = None
@@ -178,38 +172,32 @@ def _resolve_tf_dir(provider: str, template_path: str) -> str:
 def _get_os_auth(job, os_data, secrets, dlog) -> tuple:
     """
     Resolve OpenStack authentication credentials.
+
+    Returns (os_token, app_cred_id, app_cred_secret).
+    Priority:
+      1. OIDC AAI token → Keystone token (ReCaS)
+      2. App credentials from Vault (GARR and any other cloud)
+    Raises if neither is available.
     """
     uuid            = job.deployment_uuid
     os_token        = ""
     app_cred_id     = ""
     app_cred_secret = ""
 
-    # Estrazione del target_provider dal JSON
-    target_provider = ""
-    try:
-        if hasattr(job, 'orchestrator') and job.orchestrator:
-            if hasattr(job.orchestrator, 'target_provider'):
-                target_provider = str(job.orchestrator.target_provider).lower().strip()
-            elif isinstance(job.orchestrator, dict):
-                target_provider = str(job.orchestrator.get("target_provider", "")).lower().strip()
-    except Exception:
-        target_provider = ""
+    # Step 1 — try OIDC → Keystone exchange
+    if job.auth.aai_token and job.auth.aai_token.strip():
+        dlog.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
+        os_token = get_keystone_token(
+            job.auth.aai_token,
+            os_data.os_auth_url,
+            os_data.os_project_id,
+        ) or ""
+        if os_token:
+            dlog.info(f"[{uuid}] Keystone token obtained via OIDC exchange.")
+        else:
+            dlog.warning(f"[{uuid}] OIDC→Keystone exchange failed — falling back to app credentials.")
 
-    # STRADA RECAS: Scambio OIDC -> Keystone
-    if target_provider == "openstack_recas":
-        if job.auth.aai_token and job.auth.aai_token.strip():
-            dlog.info(f"[{uuid}] ReCaS target detected. Exchanging AAI token for Keystone token...")
-            os_token = get_keystone_token(
-                job.auth.aai_token,
-                os_data.os_auth_url,
-                os_data.os_project_id,
-            ) or ""
-            if os_token:
-                dlog.info(f"[{uuid}] Keystone token obtained via OIDC exchange.")
-            else:
-                dlog.warning(f"[{uuid}] OIDC→Keystone exchange failed — falling back to app credentials.")
-
-    # STRADA GARR (o fallback ReCaS se os_token è rimasto vuoto)
+    # Step 2 — fall back to app credentials from Vault
     if not os_token:
         app_cred_id     = secrets.get("app_credential_id", "")
         app_cred_secret = secrets.get("app_credential_secret", "")
@@ -223,6 +211,7 @@ def _get_os_auth(job, os_data, secrets, dlog) -> tuple:
             )
 
     return os_token, app_cred_id, app_cred_secret
+
 
 def run_orchestration(job: Job):
     """
