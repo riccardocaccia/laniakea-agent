@@ -104,7 +104,7 @@ class _ApiPushHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            push_log_line(self._uuid, record.levelname, self.format(record))
+            push_log_line(self._uuid, record.levelname, record.getMessage())
         except Exception:
             pass
 
