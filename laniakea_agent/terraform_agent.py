@@ -35,7 +35,9 @@ from laniakea_agent.notifier import send_success, send_failure
 import shutil
 from laniakea_agent.api_client import API_BASE_URL, mint_backend_token
 
-TF_PLUGIN_CACHE_HOST = os.getenv("TF_PLUGIN_CACHE_DIR_HOST", "/var/cache/laniakea-tf-plugins")
+#TF_PLUGIN_CACHE_HOST = os.getenv("TF_PLUGIN_CACHE_DIR_HOST", "/var/cache/laniakea-tf-plugins")
+TF_PLUGIN_CACHE_HOST = os.getenv(
+                "TF_PLUGIN_CACHE_DIR_HOST",os.path.expanduser("~/.cache/laniakea-tf-plugins"),)
 
 
 def _tf_init_cmd(uuid: str) -> str:
