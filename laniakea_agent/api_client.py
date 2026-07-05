@@ -30,7 +30,7 @@ AGENT_CA_CERT = os.getenv("AGENT_CA_CERT", "certs/ca.crt")
 # token lifespan
 TOKEN_TTL_SECONDS = 300 # short lived token
 
-def _mint_token() -> str:
+def _mint_token(ttl: int = TOKEN_TTL_SECONDS) -> str:
     """
     Generate a short-lived JWT signed with the master password.
 
@@ -47,10 +47,19 @@ def _mint_token() -> str:
     payload = {
         "sub": AGENT_ID,
         "iat": now,
-        "exp": now + TOKEN_TTL_SECONDS,
+        "exp": now + ttl,
         "jti": str(uuid.uuid4()),
     }
     return jwt.encode(payload, AGENT_MASTER_PASSWORD, algorithm="HS256")
+
+
+def mint_backend_token(ttl: int = 7200) -> str:
+    """
+    Long-lived token for the Terraform http backend: Terraform receives
+    the credentials at init time and reuses them for the whole operation,
+    which for a Galaxy deployment can exceed 30 minutes.
+    """
+    return _mint_token(ttl)
 
 
 def _make_client() -> httpx.Client:

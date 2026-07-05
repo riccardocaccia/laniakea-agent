@@ -31,6 +31,47 @@ from laniakea_agent.vault_utils import get_provider_credentials
 from laniakea_agent.ansible_agent import run_ansible_step
 from laniakea_agent.destroy import run_destroy
 from laniakea_agent.notifier import send_success, send_failure
+##############
+import shutil
+from laniakea_agent.api_client import API_BASE_URL, mint_backend_token
+
+TF_PLUGIN_CACHE_HOST = os.getenv("TF_PLUGIN_CACHE_DIR_HOST", "/var/cache/laniakea-tf-plugins")
+
+
+def _tf_init_cmd(uuid: str) -> str:
+    """
+    Build the terraform init command configured for the API http backend.
+    State is stored per-deployment in the API (PostgreSQL), so the agent
+    is fully stateless and any agent can destroy any deployment.
+    """
+    base  = f"{API_BASE_URL}/internal/tfstate/{uuid}"
+    token = mint_backend_token()
+    cfg = (
+        f"-backend-config=address={base} "
+        f"-backend-config=lock_address={base}/lock "
+        f"-backend-config=unlock_address={base}/lock "
+        f"-backend-config=lock_method=POST "
+        f"-backend-config=unlock_method=DELETE "
+        f"-backend-config=username=agent "
+        f"-backend-config=password={token} "
+        f"-backend-config=skip_cert_verification=true"
+    )
+    return f"terraform init -no-color {cfg}"
+
+
+def _prepare_workdir(tf_dir: str, uuid: str) -> str:
+    """
+    Copy the terraform config to a per-deployment workdir so that
+    concurrent jobs never share .terraform / lock files.
+    """
+    workdir = f"/tmp/laniakea-tf-{uuid}"
+    if os.path.exists(workdir):
+        shutil.rmtree(workdir)
+    shutil.copytree(tf_dir, workdir)
+    os.makedirs(TF_PLUGIN_CACHE_HOST, exist_ok=True)
+    return workdir
+
+###############
 
 # Logging
 logging.basicConfig(
@@ -400,25 +441,38 @@ def run_orchestration(job: Job):
                 "TF_VAR_open_ports":     json.dumps([p.model_dump() for p in aws_data.inputs.open_ports]),
             })
 
-        dlog.info(f"[{uuid}] Running Terraform container for {provider} ({tf_dir})...")
-        client.containers.run(
-            image="hashicorp/terraform:1.5",
-            entrypoint="/bin/sh",
-            command="-c 'terraform init -no-color && terraform apply -auto-approve -no-color'",
-            volumes={tf_dir: {'bind': '/src', 'mode': 'rw'}},
-            working_dir="/src",
-            environment=tf_vars,
-            remove=True,
-        )
+        # Terraform apply (per-deployment workdir + http backend)
+        workdir = _prepare_workdir(tf_dir, str(uuid))
+        tf_vars["TF_PLUGIN_CACHE_DIR"] = "/plugins"
+        dlog.info(f"[{uuid}] Running Terraform container for {provider} ({workdir})...")
 
-        dlog.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
-        vm_ip_bytes = client.containers.run(
-            image="hashicorp/terraform:1.5",
-            command="output -raw vm_ip",
-            volumes={tf_dir: {'bind': '/src', 'mode': 'ro'}},
-            working_dir="/src",
-            remove=True,
-        )
+        try:
+            client.containers.run(
+                image="hashicorp/terraform:1.5",
+                entrypoint="/bin/sh",
+                command=f"-c '{_tf_init_cmd(str(uuid))} && terraform apply -auto-approve -no-color'",
+                volumes={
+                    workdir: {'bind': '/src', 'mode': 'rw'},
+                    TF_PLUGIN_CACHE_HOST: {'bind': '/plugins', 'mode': 'rw'},
+                },
+                working_dir="/src",
+                environment=tf_vars,
+                remove=True,
+            )
+
+            # retrieve VM IP (reads state via the backend config stored in .terraform)
+            dlog.info(f"[{uuid}] Retrieving vm_ip from Terraform output...")
+            vm_ip_bytes = client.containers.run(
+                image="hashicorp/terraform:1.5",
+                command="output -raw vm_ip",
+                volumes={workdir: {'bind': '/src', 'mode': 'rw'}},
+                working_dir="/src",
+                remove=True,
+            )
+
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
         vm_ip     = vm_ip_bytes.decode('utf-8').strip()
         job.vm_ip = vm_ip
 

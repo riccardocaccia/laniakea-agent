@@ -4,6 +4,19 @@ Removes ALL resources created by Terraform.
 Auth logic mirrors terraform_agent.py:
   1. Try OIDC AAI token -> Keystone token
   2. Fall back to app credentials from Vault
+
+State management:
+  Terraform state is fetched from the API http backend (one state per
+  deployment, table tf_states): destroy works for ANY deployment,
+  from ANY agent.
+
+Return value:
+  run_destroy(job) -> bool
+  True on success, False on failure. It never raises: it is called both
+  as emergency cleanup inside run_orchestration (which must continue to
+  CREATE_FAILED + email even if destroy fails) and by
+  worker_wrapper.destroy_from_dict (which maps the bool to
+  DELETE_COMPLETE / DELETE_FAILED).
 """
 
 import json
@@ -14,6 +27,46 @@ import requests
 import laniakea_agent as _pkg
 from laniakea_agent.vault_utils import get_provider_credentials
 from laniakea_agent.auth_utils.openstack_auth import get_keystone_token
+########################
+import shutil
+from laniakea_agent.api_client import API_BASE_URL, mint_backend_token
+
+TF_PLUGIN_CACHE_HOST = os.getenv("TF_PLUGIN_CACHE_DIR_HOST", "/var/cache/laniakea-tf-plugins")
+
+
+def _tf_init_cmd(uuid: str) -> str:
+    """
+    Build the terraform init command configured for the API http backend.
+    State is stored per-deployment in the API (PostgreSQL), so the agent
+    is fully stateless and any agent can destroy any deployment.
+    """
+    base  = f"{API_BASE_URL}/internal/tfstate/{uuid}"
+    token = mint_backend_token()
+    cfg = (
+        f"-backend-config=address={base} "
+        f"-backend-config=lock_address={base}/lock "
+        f"-backend-config=unlock_address={base}/lock "
+        f"-backend-config=lock_method=POST "
+        f"-backend-config=unlock_method=DELETE "
+        f"-backend-config=username=agent "
+        f"-backend-config=password={token} "
+        f"-backend-config=skip_cert_verification=true"
+    )
+    return f"terraform init -no-color {cfg}"
+
+
+def _prepare_workdir(tf_dir: str, uuid: str) -> str:
+    """
+    Copy the terraform config to a per-deployment workdir so that
+    concurrent jobs never share .terraform / lock files.
+    """
+    workdir = f"/tmp/laniakea-tf-{uuid}"
+    if os.path.exists(workdir):
+        shutil.rmtree(workdir)
+    shutil.copytree(tf_dir, workdir)
+    os.makedirs(TF_PLUGIN_CACHE_HOST, exist_ok=True)
+    return workdir
+########################
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +157,7 @@ def _discover_nets_for_destroy(os_data, auth_token: str, uuid: str) -> tuple:
     return os_data.public_net_name, os_data.private_net_name, False
 
 
-def run_destroy(job):
+def run_destroy(job) -> bool:
     uuid     = job.deployment_uuid
     provider = job.selected_provider.lower()
     user_sub = job.get_sub()
@@ -116,12 +169,12 @@ def run_destroy(job):
             template_path = job.cloud_providers.aws.template.path
         else:
             logger.error(f"[{uuid}] Unknown provider: {provider}")
-            return
+            return False
 
         tf_dir = _resolve_tf_dir(provider, template_path)
     except Exception as exc:
         logger.error(f"[{uuid}] Cannot resolve terraform dir for destroy: {exc}")
-        return
+        return False
 
     logger.info(f"[{uuid}] Starting DESTROY on {provider} ({tf_dir})...")
 
@@ -199,16 +252,29 @@ def run_destroy(job):
                 "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "0.0.0.0",
             })
 
-        client.containers.run(
-            image="hashicorp/terraform:1.5",
-            entrypoint="/bin/sh",
-            command="-c 'terraform init -no-color && terraform destroy -auto-approve -no-color'",
-            volumes={tf_dir: {'bind': '/src', 'mode': 'rw'}},
-            working_dir="/src",
-            environment=tf_vars,
-            remove=True,
-        )
+        # per-deployment workdir + http backend: the state for THIS uuid is
+        # pulled from the API, so destroy works for any past deployment.
+        workdir = _prepare_workdir(tf_dir, str(uuid))
+        tf_vars["TF_PLUGIN_CACHE_DIR"] = "/plugins"
+        try:
+            client.containers.run(
+                image="hashicorp/terraform:1.5",
+                entrypoint="/bin/sh",
+                command=f"-c '{_tf_init_cmd(str(uuid))} && terraform destroy -auto-approve -no-color'",
+                volumes={
+                    workdir: {'bind': '/src', 'mode': 'rw'},
+                    TF_PLUGIN_CACHE_HOST: {'bind': '/plugins', 'mode': 'rw'},
+                },
+                working_dir="/src",
+                environment=tf_vars,
+                remove=True,
+            )
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
         logger.info(f"[{uuid}] Resources destroyed successfully on {provider}.")
+        return True
 
     except Exception as e:
         logger.error(f"[{uuid}] CRITICAL ERROR during destroy on {provider}: {e}")
+        return False
