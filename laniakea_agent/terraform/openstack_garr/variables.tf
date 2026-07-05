@@ -90,3 +90,7 @@ variable "endpoint_image" {
   default = ""
 }
 
+variable "vm_name" {
+  type    = string
+  default = "LANIAKEA-vm01"
+}

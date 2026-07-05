@@ -89,7 +89,7 @@ resource "openstack_networking_secgroup_rule_v2" "rules" {
 # --- VM ---
 
 resource "openstack_compute_instance_v2" "galaxy_vm" {
-  name        = "galaxy-${var.deployment_uuid}"
+  name        = "${var.vm_name}-${var.deployment_uuid}"
   image_name  = var.image_name
   flavor_name = var.flavor_name
   key_pair    = openstack_compute_keypair_v2.vm_key.name

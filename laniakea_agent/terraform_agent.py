@@ -101,12 +101,14 @@ class AuthConfig(BaseModel):
 
 class OpenStackInputs(BaseModel):
     flavor:       str
+    hostname:     Optional[str] = "LANIAKEA-vm01"
     image:        str
     network_type: str = "private"
     open_ports:   list[OpenPort] = []
 
 class AWSInputs(BaseModel):
     instance_type: str
+    hostname:     Optional[str] = "LANIAKEA-vm01"
     image:         str
     network_type:  str = "public"
     open_ports:    list[OpenPort] = []
@@ -359,6 +361,7 @@ def run_orchestration(job: Job):
             proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
 
             tf_vars.update({
+                "TF_VAR_vm_name":              os_data.inputs.hostname or "LANIAKEA-vm01",
                 "TF_VAR_os_auth_url":          os_data.os_auth_url,
                 "TF_VAR_os_tenant_id":         os_data.os_project_id,
                 "TF_VAR_os_token":             os_token,
@@ -386,6 +389,7 @@ def run_orchestration(job: Job):
                 raise Exception("AWS access_key or secret_key not found in Vault credentials!")
 
             tf_vars.update({
+                "TF_VAR_vm_name":        aws_data.inputs.hostname or "LANIAKEA-vm01",
                 "TF_VAR_aws_access_key": access_key,
                 "TF_VAR_aws_secret_key": secret_key,
                 "TF_VAR_aws_region":     aws_data.region,
