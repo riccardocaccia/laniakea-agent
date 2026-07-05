@@ -144,6 +144,7 @@ class Job(BaseModel):
     auth:              AuthConfig
     selected_provider: str
     cloud_providers:   CloudProviders
+    service_type:      Optional[str] = "galaxy"   # galaxy | vm
     user_sub:          Optional[str] = None
     user_email:        Optional[str] = None
     requested_by:      Optional[str] = None
@@ -420,15 +421,27 @@ def run_orchestration(job: Job):
         dlog.info(f"[{uuid}] Waiting 30s for SSH on Rocky...")
         time.sleep(30)
         dlog.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
+        
+    
+        # Ansible config
+        # Configuration step: depends on the requested service type.
+        # 'vm'     -> plain VM, infrastructure only, skip Ansible
+        # 'galaxy' -> full Galaxy configuration via Ansible (default)
+        service_type = (job.service_type or "galaxy").lower()
 
-        _repo_url_tpl = os.path.join(os.path.dirname(_pkg.__file__), "repo_url_template.yml")
-        with open(_repo_url_tpl, "r") as yf:
-            tpl = yaml.safe_load(yf)
+        if service_type == "vm":
+            dlog.info(f"[{uuid}] service_type=vm: infrastructure only, skipping Ansible step.")
+            ansible_ok = True
+        else:
+            # resolve repo_url_template.yml from the installed package
+            _repo_url_tpl = os.path.join(os.path.dirname(_pkg.__file__), "repo_url_template.yml")
+            with open(_repo_url_tpl, "r") as yf:
+                tpl = yaml.safe_load(yf)
 
-        pb_url  = tpl['resources']['ansible']['playbook']
-        req_url = tpl['resources']['ansible']['requirements']
+            pb_url  = tpl['resources']['ansible']['playbook']
+            req_url = tpl['resources']['ansible']['requirements']
 
-        ansible_ok = run_ansible_step(job, pb_url, req_url)
+            ansible_ok = run_ansible_step(job, pb_url, req_url)
 
         if not ansible_ok:
             dlog.error(f"[{uuid}] Ansible failed: running emergency destroy...")
