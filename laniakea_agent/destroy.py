@@ -21,8 +21,10 @@ Return value:
 
 import json
 import os
+import re
 import docker
 import logging
+import time
 import requests
 import laniakea_agent as _pkg
 from laniakea_agent.vault_utils import get_provider_credentials
@@ -65,7 +67,9 @@ def _prepare_workdir(tf_dir: str, uuid: str) -> str:
     """
     workdir = f"/tmp/laniakea-tf-{uuid}"
     if os.path.exists(workdir):
-        shutil.rmtree(workdir)
+        shutil.rmtree(workdir, ignore_errors=True)
+    if os.path.exists(workdir):   
+        workdir = f"{workdir}-{int(time.time())}"
     shutil.copytree(tf_dir, workdir)
     os.makedirs(TF_PLUGIN_CACHE_HOST, exist_ok=True)
     return workdir
@@ -242,6 +246,7 @@ def run_destroy(job) -> bool:
                 "TF_VAR_flavor_name":          os_data.inputs.flavor,
                 "TF_VAR_network_type":         os_data.inputs.network_type,
                 "TF_VAR_bastion_ip":           proxy_host,
+                "TF_VAR_storage_size_gb":      str(int(re.match(r'(\d+)', os_data.inputs.storage_size or '0 ').group(1))),
             })
 
         elif provider == 'aws':
@@ -269,6 +274,7 @@ def run_destroy(job) -> bool:
                     TF_PLUGIN_CACHE_HOST: {'bind': '/plugins', 'mode': 'rw'},
                 },
                 working_dir="/src",
+                user=f"{os.getuid()}:{os.getgid()}",
                 environment=tf_vars,
                 remove=True,
             )

@@ -94,3 +94,8 @@ variable "vm_name" {
   type    = string
   default = "LANIAKEA-vm01"
 }
+
+variable "storage_size_gb" {
+  type = number
+  default = 0
+}

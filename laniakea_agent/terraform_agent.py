@@ -20,6 +20,7 @@ Notifications:
 import json
 import docker
 import os
+import re
 import yaml
 import logging
 import time
@@ -68,7 +69,9 @@ def _prepare_workdir(tf_dir: str, uuid: str) -> str:
     """
     workdir = f"/tmp/laniakea-tf-{uuid}"
     if os.path.exists(workdir):
-        shutil.rmtree(workdir)
+        shutil.rmtree(workdir, ignore_errors=True)
+    if os.path.exists(workdir):   # residui
+        workdir = f"{workdir}-{int(time.time())}"
     shutil.copytree(tf_dir, workdir)
     os.makedirs(TF_PLUGIN_CACHE_HOST, exist_ok=True)
     return workdir
@@ -148,6 +151,7 @@ class OpenStackInputs(BaseModel):
     image:        str
     network_type: str = "private"
     open_ports:   list[OpenPort] = []
+    storage_size: Optional[str] = ""
 
 class AWSInputs(BaseModel):
     instance_type: str
@@ -422,6 +426,7 @@ def run_orchestration(job: Job):
                 "TF_VAR_network_type":         os_data.inputs.network_type,
                 "TF_VAR_bastion_ip":           proxy_host,
                 "TF_VAR_open_ports":           json.dumps([p.model_dump() for p in os_data.inputs.open_ports]),
+                "TF_VAR_storage_size_gb":      str(int(re.match(r'(\d+)', os_data.inputs.storage_size or '0 ').group(1))),
             })
 
         elif provider == 'aws':
@@ -458,6 +463,7 @@ def run_orchestration(job: Job):
                     TF_PLUGIN_CACHE_HOST: {'bind': '/plugins', 'mode': 'rw'},
                 },
                 working_dir="/src",
+                user=f"{os.getuid()}:{os.getgid()}",
                 environment=tf_vars,
                 remove=True,
             )
@@ -467,8 +473,12 @@ def run_orchestration(job: Job):
             vm_ip_bytes = client.containers.run(
                 image="hashicorp/terraform:1.5",
                 command="output -raw vm_ip",
-                volumes={workdir: {'bind': '/src', 'mode': 'rw'}},
+                volumes={
+                    workdir: {'bind': '/src', 'mode': 'rw'},
+                    TF_PLUGIN_CACHE_HOST: {'bind': '/plugins', 'mode': 'rw'},   # <- mancava
+                },
                 working_dir="/src",
+                user=f"{os.getuid()}:{os.getgid()}",
                 remove=True,
             )
 
@@ -505,11 +515,10 @@ def run_orchestration(job: Job):
 
         if not ansible_ok:
             dlog.error(f"[{uuid}] Ansible failed: running emergency destroy...")
-            run_destroy(job)
-            update_deployment_status(
-                uuid, "CREATE_FAILED",
-                status_reason="Configuration step (Ansible) failed. Resources destroyed.",
-            )
+            destroyed = run_destroy(job)
+            reason = "Configuration step (Ansible) failed. Resources destroyed." if destroyed \
+                    else "Ansible failed AND emergency destroy FAILED"
+            update_deployment_status(uuid, "CREATE_FAILED", status_reason=reason)
             send_failure(email, username, uuid,
                 reason="Configuration step (Ansible) failed. Resources have been cleaned up.")
         else:

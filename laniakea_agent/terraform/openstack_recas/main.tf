@@ -88,6 +88,19 @@ resource "openstack_networking_secgroup_rule_v2" "rules" {
 }
 
 # --- VM ---
+locals {
+  # cloud-init snippet: format and mount the data volume (only when requested)
+  mount_data_volume = var.storage_size_gb > 0 ? <<-EOT
+    runcmd:
+      - |
+        for i in $(seq 1 30); do [ -b /dev/vdb ] && break; sleep 5; done
+        if ! blkid /dev/vdb; then mkfs.ext4 -L data /dev/vdb; fi
+        mkdir -p /data
+        echo 'LABEL=data /data ext4 defaults,nofail 0 2' >> /etc/fstab
+        mount -a
+  EOT
+  : ""
+}
 
 resource "openstack_compute_instance_v2" "galaxy_vm" {
   name        = "${var.vm_name}-${var.deployment_uuid}"
@@ -101,7 +114,8 @@ resource "openstack_compute_instance_v2" "galaxy_vm" {
     openstack_networking_secgroup_v2.dynamic_sg.name,
   ]
 
-  user_data = <<-USERDATA
+user_data = <<-USERDATA
+#cloud-config
 users:
   - default
   - name: rocky
@@ -109,12 +123,28 @@ users:
     groups: wheel
     shell: /bin/bash
 append_to_groups: true
+${local.mount_data_volume}
 USERDATA
 
   network {
     uuid = var.network_type == "public" ? data.openstack_networking_network_v2.public_net.id : data.openstack_networking_network_v2.private_net.id
   }
 }
+
+# --- STORAGE ---
+
+resource "openstack_blockstorage_volume_v3" "data" {
+  count = var.storage_size_gb > 0 ? 1 : 0
+  name  = "${var.vm_name}-${var.deployment_uuid}-data"
+  size  = var.storage_size_gb
+}
+
+resource "openstack_compute_volume_attach_v2" "data_attach" {
+  count       = var.storage_size_gb > 0 ? 1 : 0
+  instance_id = openstack_compute_instance_v2.galaxy_vm.id
+  volume_id   = openstack_blockstorage_volume_v3.data[0].id
+}
+
 
 # --- FLOATING IP (only when topology=floating_ip AND network_type=public) ---
 
