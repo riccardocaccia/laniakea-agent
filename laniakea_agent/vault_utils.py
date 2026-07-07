@@ -64,10 +64,25 @@ def get_user_credentials(user_sub: str) -> dict:
 
 
 def get_provider_credentials(user_sub: str, provider: str) -> dict:
-    all_creds = get_user_credentials(user_sub)
-    provider  = provider.lower()
+    """
+    Global creds (ssh keys) + the matching service_creds entry merged on top.
+    OpenStack entries are bound to a cloud by auth_url; AWS by service_type.
+    """
+    merged = _read_path(f"{user_sub}/credentials")      
+    names = _list_path(f"{user_sub}/service_creds")         
+    norm = lambda u: (u or "").rstrip("/").lower()
+    for n in names:
+        entry = _read_path(f"{user_sub}/service_creds/{n}")
+        st = entry.get("service_type", "openstack")
+        if provider == "openstack" and st == "openstack" \
+           and norm(entry.get("openstack_auth_url")) == norm(os_auth_url):
+            merged.update(entry); break
+        if provider == "aws" and st == "aws":
+            merged.update(entry); break
 
-    if provider == "openstack":
+    #all_creds = get_user_credentials(user_sub)
+    #provider  = provider.lower()
+    if provider == "openstack"
         # NOTE: act here for secret mod.
         return {
             "ssh_key":               all_creds.get("openstack_ssh_key"),

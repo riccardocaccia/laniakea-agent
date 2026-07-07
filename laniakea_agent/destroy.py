@@ -187,7 +187,9 @@ def run_destroy(job) -> bool:
 
     try:
         client  = docker.from_env()
-        secrets = get_provider_credentials(user_sub, provider)
+        #secrets = get_provider_credentials(user_sub, provider)
+        secrets = get_provider_credentials(user_sub, provider,
+                      os_auth_url=os_data.os_auth_url if provider == 'openstack' else "")
         ssh_key = secrets.get("ssh_key", "dummy")
 
         tf_vars = {
