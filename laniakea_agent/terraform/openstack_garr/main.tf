@@ -96,8 +96,8 @@ resource "openstack_networking_port_v2" "vm_port" {
 
 # --- VM ---
 locals {
-  # cloud-init snippet: format and mount the data volume (only when requested)
-  mount_data_volume = var.storage_size_gb > 0 ? <<-EOT
+  # cloud-init snippet to format and mount the data volume
+  mount_snippet = <<-EOT
     runcmd:
       - |
         for i in $(seq 1 30); do [ -b /dev/vdb ] && break; sleep 5; done
@@ -106,7 +106,9 @@ locals {
         echo 'LABEL=data /data ext4 defaults,nofail 0 2' >> /etc/fstab
         mount -a
   EOT
-  : ""
+
+  # applied only when storage is requested
+  mount_data_volume = var.storage_size_gb > 0 ? local.mount_snippet : ""
 }
 
 resource "openstack_compute_instance_v2" "galaxy_vm" {
