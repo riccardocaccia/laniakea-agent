@@ -198,6 +198,7 @@ class Job(BaseModel):
     user_email:        Optional[str] = None
     requested_by:      Optional[str] = None
     vm_ip:             Optional[str] = None
+    credentials_name:  Optional[str] = ""         # creds selection
 
     def get_sub(self) -> str:
         return self.user_sub or self.auth.sub
