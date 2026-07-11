@@ -330,8 +330,11 @@ def run_orchestration(job: Job):
 
         dlog.info(f"[{uuid}] Reading credentials from Vault...")
         #secrets = get_provider_credentials(user_sub, provider)
-        secrets = get_provider_credentials(user_sub, provider,
-                      os_auth_url=os_data.os_auth_url if provider == 'openstack' else "")
+        secrets = get_provider_credentials(
+                      user_sub, provider,
+                      os_auth_url=job.cloud_providers.openstack.os_auth_url if provider == 'openstack' else "",
+                      credentials_name=getattr(job, "credentials_name", "") or "",
+                      )
         ssh_key = secrets.get("ssh_key")
         if not ssh_key:
             raise Exception("ssh_key not found in Vault credentials!")
