@@ -175,6 +175,7 @@ class OpenStackProvider(BaseModel):
     endpoint_overrides_volumev3: str = ""
     endpoint_overrides_image:    str = ""
     private_network_proxy_host:  Optional[str] = None
+    existing_floating_ip:        str = ""
     template:                    TemplateConfig = TemplateConfig()
     inputs:                      OpenStackInputs
 
