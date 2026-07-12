@@ -141,8 +141,11 @@ def find_free_floating_ip(neutron_url: str, os_token: str) -> str:
     instead of allocating new ones (quota-friendly).
     """
     try:
+        base = neutron_url.rstrip("/")
+        if not base.endswith("/v2.0"):
+            base += "/v2.0"
         r = requests.get(
-            f"{neutron_url}/floatingips",
+            f"{base}/floatingips",
             headers={"X-Auth-Token": os_token},
             verify=False, timeout=10,
         )
