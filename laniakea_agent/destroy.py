@@ -251,6 +251,7 @@ def run_destroy(job) -> bool:
                 "TF_VAR_network_type":         os_data.inputs.network_type,
                 "TF_VAR_bastion_ip":           proxy_host,
                 "TF_VAR_storage_size_gb":      str(int(re.match(r'(\d+)', os_data.inputs.storage_size or '0 ').group(1))),
+                "TF_VAR_existing_fip":         getattr(os_data, "existing_floating_ip", "") or "",
             })
 
         elif provider == 'aws':

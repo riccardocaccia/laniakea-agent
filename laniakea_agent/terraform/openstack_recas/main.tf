@@ -151,21 +151,29 @@ resource "openstack_compute_volume_attach_v2" "data_attach" {
 
 # --- FLOATING IP (only when topology=floating_ip AND network_type=public) ---
 
+# Alloca una FIP nuova SOLO se l'agent non ne ha trovata una libera da riusare
 resource "openstack_networking_floatingip_v2" "fip" {
-  count = var.use_floating_ip ? 1 : 0
+  count = var.use_floating_ip && var.existing_fip == "" ? 1 : 0
   pool  = var.public_network_name
+}
+
+locals {
+  vm_fip = var.use_floating_ip ? (
+    var.existing_fip != "" ? var.existing_fip : openstack_networking_floatingip_v2.fip[0].address
+  ) : ""
 }
 
 resource "openstack_compute_floatingip_associate_v2" "fip_assoc" {
   count       = var.use_floating_ip ? 1 : 0
-  floating_ip = openstack_networking_floatingip_v2.fip[0].address
+  floating_ip = local.vm_fip
   instance_id = openstack_compute_instance_v2.galaxy_vm.id
 }
 
 # --- OUTPUT ---
 
 output "vm_ip" {
-  value       = var.use_floating_ip ? openstack_networking_floatingip_v2.fip[0].address : openstack_compute_instance_v2.galaxy_vm.access_ip_v4
+  value       = var.use_floating_ip ? local.vm_fip : openstack_compute_instance_v2.galaxy_vm.access_ip_v4
   description = "IP address to reach the VM"
 }
+
 
