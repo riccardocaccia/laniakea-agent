@@ -413,6 +413,16 @@ def run_orchestration(job: Job):
 
             proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
 
+            # Floating IP resolution: pinned in cloud JSON > first free one > allocate new
+            existing_fip = os_data.existing_floating_ip or ""
+            if use_floating_ip and not existing_fip and neutron_url and discovery_token:
+                from laniakea_agent.network_discovery import find_free_floating_ip
+                existing_fip = find_free_floating_ip(neutron_url, discovery_token)
+                if existing_fip:
+                    dlog.info(f"[{uuid}] Reusing free floating IP: {existing_fip}")
+                else:
+                    dlog.info(f"[{uuid}] No free floating IP: a new one will be allocated.")
+
             tf_vars.update({
                 "TF_VAR_vm_name":              os_data.inputs.hostname or "LANIAKEA-vm01",
                 "TF_VAR_os_auth_url":          os_data.os_auth_url,
@@ -433,6 +443,7 @@ def run_orchestration(job: Job):
                 "TF_VAR_bastion_ip":           proxy_host,
                 "TF_VAR_open_ports":           json.dumps([p.model_dump() for p in os_data.inputs.open_ports]),
                 "TF_VAR_storage_size_gb":      str(int(re.match(r'(\d+)', os_data.inputs.storage_size or '0 ').group(1))),
+                "TF_VAR_existing_fip":         existing_fip,
             })
 
         elif provider == 'aws':

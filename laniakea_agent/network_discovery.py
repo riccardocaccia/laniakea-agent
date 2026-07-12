@@ -133,3 +133,24 @@ def discover_networks(
     )
 
     return result
+
+def find_free_floating_ip(neutron_url: str, os_token: str) -> str:
+    """
+    Return the first allocated-but-unassociated floating IP of the project
+    (port_id is null), or "" if none. Lets deployments reuse existing FIPs
+    instead of allocating new ones (quota-friendly).
+    """
+    try:
+        r = requests.get(
+            f"{neutron_url}/floatingips",
+            headers={"X-Auth-Token": os_token},
+            verify=False, timeout=10,
+        )
+        r.raise_for_status()
+        for fip in r.json().get("floatingips", []):
+            if not fip.get("port_id"):
+                logger.info(f"[network_discovery] Free floating IP found: {fip['floating_ip_address']}")
+                return fip["floating_ip_address"]
+    except Exception as exc:
+        logger.warning(f"[network_discovery] Floating IP lookup failed: {exc}")
+    return ""

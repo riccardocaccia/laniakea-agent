@@ -99,3 +99,8 @@ variable "storage_size_gb" {
   type = number
   default = 0
 }
+
+variable "existing_fip" { 
+  type = string  
+  default = "" 
+}
