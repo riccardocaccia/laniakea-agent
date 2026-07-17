@@ -107,15 +107,19 @@ def _get_os_auth_destroy(job, os_data, secrets, uuid) -> tuple:
     app_cred_id     = ""
     app_cred_secret = ""
 
-    if job.auth.aai_token and job.auth.aai_token.strip():
-        logger.info(f"[{uuid}] AAI token found — exchanging for Keystone token (destroy)...")
+    idp = getattr(os_data, "keystone_identity_provider", "") or ""
+    if job.auth.aai_token and job.auth.aai_token.strip() and idp:
+        logger.info(f"[{uuid}] AAI token found — exchanging for Keystone token (destroy, IdP: {idp})...")
         os_token = get_keystone_token(
             job.auth.aai_token,
             os_data.os_auth_url,
             os_data.os_project_id,
+            identity_provider=idp,
         ) or ""
         if not os_token:
             logger.warning(f"[{uuid}] OIDC→Keystone failed — falling back to app credentials (destroy).")
+    elif not idp:
+        logger.info(f"[{uuid}] No Keystone identity provider for this cloud — using app credentials (destroy).")
 
     if not os_token:
         app_cred_id     = secrets.get("app_credential_id", "")
