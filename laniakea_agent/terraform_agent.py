@@ -176,6 +176,8 @@ class OpenStackProvider(BaseModel):
     endpoint_overrides_image:    str = ""
     private_network_proxy_host:  Optional[str] = None
     existing_floating_ip:        str = ""
+    keystone_identity_provider:  str = ""
+    ssh_key:                     str = ""
     template:                    TemplateConfig = TemplateConfig()
     inputs:                      OpenStackInputs
 
@@ -236,18 +238,22 @@ def _get_os_auth(job, os_data, secrets, dlog) -> tuple:
     app_cred_id     = ""
     app_cred_secret = ""
 
-    # Step 1 — try OIDC → Keystone exchange
-    if job.auth.aai_token and job.auth.aai_token.strip():
-        dlog.info(f"[{uuid}] AAI token found: exchanging for Keystone token...")
+    # Step 1 — try OIDC → Keystone exchange (only if the cloud has a federated IdP)
+    idp = getattr(os_data, "keystone_identity_provider", "") or ""
+    if job.auth.aai_token and job.auth.aai_token.strip() and idp:
+        dlog.info(f"[{uuid}] AAI token found: exchanging for Keystone token (IdP: {idp})...")
         os_token = get_keystone_token(
             job.auth.aai_token,
             os_data.os_auth_url,
             os_data.os_project_id,
+            identity_provider=idp,
         ) or ""
         if os_token:
             dlog.info(f"[{uuid}] Keystone token obtained via OIDC exchange.")
         else:
             dlog.warning(f"[{uuid}] OIDC→Keystone exchange failed — falling back to app credentials.")
+    elif not idp:
+        dlog.info(f"[{uuid}] No Keystone identity provider for this cloud — using app credentials.")
 
     # Step 2 — fall back to app credentials from Vault
     if not os_token:
@@ -336,9 +342,16 @@ def run_orchestration(job: Job):
                       os_auth_url=job.cloud_providers.openstack.os_auth_url if provider == 'openstack' else "",
                       credentials_name=getattr(job, "credentials_name", "") or "",
                       )
-        ssh_key = secrets.get("ssh_key")
+        # SSH public key: the job payload (dashboard DB) is the source of
+        # truth; the Vault global entry remains as legacy fallback only.
+        # NOTE: os_data is defined later — go through job.cloud_providers here.
+        _os_prov = job.cloud_providers.openstack if provider == 'openstack' else None
+        ssh_key = ((getattr(_os_prov, "ssh_key", "") or "").strip()
+                   or secrets.get("ssh_key"))
         if not ssh_key:
-            raise Exception("ssh_key not found in Vault credentials!")
+            raise Exception(
+                "SSH public key missing: upload it in the dashboard "
+                "(SSH Keys page) before deploying.")
 
         tf_vars = {
             "TF_VAR_deployment_uuid": str(uuid),
@@ -506,7 +519,7 @@ def run_orchestration(job: Job):
         vm_ip     = vm_ip_bytes.decode('utf-8').strip()
         job.vm_ip = vm_ip
 
-        dlog.info(f"[{uuid}] Waiting 30s for SSH on Rocky...")
+        dlog.info(f"[{uuid}] Waiting 30s for SSH to become available on the VM...")
         time.sleep(30)
         dlog.info(f"[{uuid}] Infrastructure ready. IP: {vm_ip}")
         

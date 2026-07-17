@@ -212,11 +212,13 @@ def check_quota(job) -> tuple:
     os_data  = job.cloud_providers.openstack
     os_token = ""
 
-    if job.auth.aai_token and job.auth.aai_token.strip():
+    idp = getattr(os_data, "keystone_identity_provider", "") or ""
+    if job.auth.aai_token and job.auth.aai_token.strip() and idp:
         try:
             from laniakea_agent.auth_utils.openstack_auth import get_keystone_token
             os_token = get_keystone_token(
-                job.auth.aai_token, os_data.os_auth_url, os_data.os_project_id
+                job.auth.aai_token, os_data.os_auth_url, os_data.os_project_id,
+                identity_provider=idp,
             ) or ""
         except Exception as exc:
             logger.warning(f"[quota] AAI→Keystone exchange failed: {exc}")
