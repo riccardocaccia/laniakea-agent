@@ -428,7 +428,7 @@ def run_orchestration(job: Job):
                 private_net_name = os_data.private_net_name
                 use_floating_ip  = False
 
-            proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
+            proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or ""
 
             # Floating IP resolution: pinned in cloud JSON > first free one > allocate new
             existing_fip = os_data.existing_floating_ip or ""
@@ -479,7 +479,7 @@ def run_orchestration(job: Job):
                 "TF_VAR_instance_type":  aws_data.inputs.instance_type,
                 "TF_VAR_image_name":     str(aws_data.inputs.image).strip(),
                 "TF_VAR_network_type":   aws_data.inputs.network_type,
-                "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "0.0.0.0",
+                "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "",
                 "TF_VAR_open_ports":     json.dumps([p.model_dump() for p in aws_data.inputs.open_ports]),
             })
 

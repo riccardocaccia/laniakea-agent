@@ -22,7 +22,8 @@ variable "ssh_public_key" {
 }
 
 variable "bastion_ip" {
-  type = string
+  type    = string
+  default = ""
 }
 
 variable "image_name" {
@@ -54,3 +55,9 @@ variable "network_type" {
   type    = string
   default = "public"
 }
+
+variable "vm_name" {
+  type    = string
+  default = "LANIAKEA-vm01"
+}
+

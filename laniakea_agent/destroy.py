@@ -202,7 +202,7 @@ def run_destroy(job) -> bool:
             "TF_VAR_deployment_uuid": str(uuid),
             "TF_VAR_ssh_public_key":  str(ssh_key).strip(),
             "TF_VAR_image_name":      "dummy",
-            "TF_VAR_bastion_ip":      "0.0.0.0",
+            "TF_VAR_bastion_ip":      "",
             "TF_VAR_open_ports":      json.dumps([]),
         }
 
@@ -236,7 +236,7 @@ def run_destroy(job) -> bool:
                 os_data, discovery_token, uuid
             )
 
-            proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or "0.0.0.0"
+            proxy_host = secrets.get("proxy_host") or os_data.private_network_proxy_host or ""
 
             tf_vars.update({
                 "TF_VAR_os_auth_url":          os_data.os_auth_url,
@@ -256,6 +256,7 @@ def run_destroy(job) -> bool:
                 "TF_VAR_bastion_ip":           proxy_host,
                 "TF_VAR_storage_size_gb":      str(int(re.match(r'(\d+)', os_data.inputs.storage_size or '0 ').group(1))),
                 "TF_VAR_existing_fip":         getattr(os_data, "existing_floating_ip", "") or "",
+                "TF_VAR_os_insecure":          "true" if getattr(os_data, "tls_insecure", False) else "false",
             })
 
         elif provider == 'aws':
@@ -266,7 +267,7 @@ def run_destroy(job) -> bool:
                 "TF_VAR_aws_region":     aws_data.region,
                 "TF_VAR_instance_type":  aws_data.inputs.instance_type,
                 "TF_VAR_network_type":   aws_data.inputs.network_type,
-                "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "0.0.0.0",
+                "TF_VAR_bastion_ip":     secrets.get("bastion_ip") or aws_data.bastion_ip or "",
             })
 
         # per-deployment workdir + http backend: the state for THIS uuid is
