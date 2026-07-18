@@ -178,12 +178,14 @@ class OpenStackProvider(BaseModel):
     existing_floating_ip:        str = ""
     keystone_identity_provider:  str = ""
     ssh_key:                     str = ""
+    tls_insecure:                bool = False
     template:                    TemplateConfig = TemplateConfig()
     inputs:                      OpenStackInputs
 
 class AWSProvider(BaseModel):
     region:     str
     bastion_ip: Optional[str] = None
+    ssh_key:    str = ""
     template:   TemplateConfig = TemplateConfig(path="aws")
     inputs:     AWSInputs
 
@@ -345,8 +347,9 @@ def run_orchestration(job: Job):
         # SSH public key: the job payload (dashboard DB) is the source of
         # truth; the Vault global entry remains as legacy fallback only.
         # NOTE: os_data is defined later — go through job.cloud_providers here.
-        _os_prov = job.cloud_providers.openstack if provider == 'openstack' else None
-        ssh_key = ((getattr(_os_prov, "ssh_key", "") or "").strip()
+        _prov = (job.cloud_providers.openstack if provider == 'openstack'
+                 else job.cloud_providers.aws)
+        ssh_key = ((getattr(_prov, "ssh_key", "") or "").strip()
                    or secrets.get("ssh_key"))
         if not ssh_key:
             raise Exception(
@@ -445,6 +448,7 @@ def run_orchestration(job: Job):
                 "TF_VAR_os_app_cred_id":       app_cred_id,
                 "TF_VAR_os_app_cred_secret":   app_cred_secret,
                 "TF_VAR_os_region":            os_data.region_name,
+                "TF_VAR_os_insecure":          "true" if getattr(os_data, "tls_insecure", False) else "false",
                 "TF_VAR_private_network_name": private_net_name,
                 "TF_VAR_public_network_name":  public_net_name,
                 "TF_VAR_use_floating_ip":      "true" if use_floating_ip else "false",
