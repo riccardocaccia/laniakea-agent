@@ -83,6 +83,7 @@ PROVIDER_TERRAFORM_MAP: dict = {
     "openstack":       os.path.join(_PKG_TERRAFORM, "openstack_recas"),
     "openstack_recas": os.path.join(_PKG_TERRAFORM, "openstack_recas"),
     "openstack_garr":  os.path.join(_PKG_TERRAFORM, "openstack_garr"),
+    "openstack_cnr":    os.path.join(_PKG_TERRAFORM, "openstack_cnr"),
     "aws":             os.path.join(_PKG_TERRAFORM, "aws"),
 }
 
